@@ -1,0 +1,319 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { execSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
+// Helper mempercantik nama model untuk statusline
+function formatModelDisplayName(rawId: string): string {
+  if (!rawId) return "pi";
+
+  let clean = rawId.replace(/^(ag|cx|openai|google|anthropic|9router)\//i, "");
+
+  if (/^gemini/i.test(clean)) {
+    const parts = clean.split("-");
+    let name = "Gemini";
+    let version = "";
+    let type = "";
+    let effort = "";
+
+    for (let i = 1; i < parts.length; i++) {
+      const p = parts[i];
+      if (/^\d+(\.\d+)?$/.test(p)) {
+        version = p;
+      } else if (p.toLowerCase() === "flash" || p.toLowerCase() === "pro") {
+        type = p.charAt(0).toUpperCase() + p.slice(1);
+      } else if (["low", "medium", "high", "thinking"].includes(p.toLowerCase())) {
+        effort = `(${p.charAt(0).toUpperCase() + p.slice(1)})`;
+      }
+    }
+    return [name, version, type, effort].filter(Boolean).join(" ");
+  }
+
+  if (/^claude/i.test(clean)) {
+    clean = clean.replace(/claude-?/i, "Claude ");
+    clean = clean.replace(/-/g, " ");
+    return clean;
+  }
+
+  if (/^gpt/i.test(clean)) {
+    return clean.replace(/gpt-/i, "GPT-");
+  }
+
+  return clean;
+}
+
+// Baca nilai reserveTokens dari ~/.pi/agent/settings.json secara dinamis
+function getCompactionReserveTokens(modelKey?: string): number {
+  const DEFAULT_RESERVE_TOKENS = 16384;
+  try {
+    const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+      const compaction = settings.compaction;
+      if (compaction) {
+        if (modelKey && compaction.modelOverrides?.[modelKey]?.reserveTokens !== undefined) {
+          return Number(compaction.modelOverrides[modelKey].reserveTokens);
+        }
+        if (compaction.reserveTokens !== undefined) {
+          return Number(compaction.reserveTokens);
+        }
+      }
+    }
+  } catch {}
+  return DEFAULT_RESERVE_TOKENS;
+}
+
+// Helper membaca status git (modified, added, deleted, untracked)
+function getGitStats(): string | null {
+  try {
+    const status = execSync("git status --porcelain", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "ignore"],
+      timeout: 1000,
+    }).trim();
+
+    if (!status) return null;
+
+    let modified = 0;
+    let added = 0;
+    let deleted = 0;
+    let untracked = 0;
+
+    for (const line of status.split("\n")) {
+      const x = line[0];
+      const y = line[1];
+      if (x === "?" && y === "?") untracked++;
+      else if (x === "A" || y === "A") added++;
+      else if (x === "D" || y === "D") deleted++;
+      else if (x === "M" || y === "M" || x === "R") modified++;
+    }
+
+    const parts: string[] = [];
+    if (modified > 0) parts.push(`~${modified}`);
+    if (added > 0) parts.push(`+${added}`);
+    if (deleted > 0) parts.push(`-${deleted}`);
+    if (untracked > 0) parts.push(`?${untracked}`);
+
+    return parts.length > 0 ? parts.join(" ") : null;
+  } catch {
+    return null;
+  }
+}
+
+export default function (pi: ExtensionAPI) {
+  let timerId: any = null;
+  let startTime = 0;
+  let frameIdx = 0;
+  let currentAction = "Thinking";
+  let isBusy = false;
+  let requestTuiRender: (() => void) | null = null;
+
+  const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    initCleanVimUI(ctx);
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    startTime = Date.now();
+    frameIdx = 0;
+    currentAction = "Thinking";
+    isBusy = true;
+
+    ctx.ui.setWorkingVisible(false);
+    updateWorkingWidget(ctx);
+    requestTuiRender?.();
+
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {
+      frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
+      updateWorkingWidget(ctx);
+    }, 80);
+  });
+
+  // Intercept user input: terjemahkan token [Image #N] kembali ke real path sebelum dikirim ke agent/tools
+  pi.on("input", async (event) => {
+    let text = event.text;
+    const imgMap = (globalThis as any).__pi_image_map;
+    if (imgMap && imgMap instanceof Map && imgMap.size > 0) {
+      let changed = false;
+      for (const [badge, realPath] of imgMap.entries()) {
+        if (text.includes(badge)) {
+          text = text.replaceAll(badge, realPath);
+          changed = true;
+        }
+      }
+      if (changed) {
+        return { action: "transform", text };
+      }
+    }
+    return { action: "continue" };
+  });
+
+  // Render format badge [Image #N] di pesan bubble transcript / history agar tetap ringkas
+  pi.registerMarkdownTransformer((markdown, context) => {
+    if (context.messageType === "user") {
+      // Ganti path clipboard menjadi badge pendek jika ada
+      return markdown.replace(/[A-Za-z]:\\[^\s`"'<>]+\\pi-clipboard-[a-f0-9-]+\.(png|jpg|jpeg|webp|gif)/gi, (match) => {
+        const imgMap = (globalThis as any).__pi_image_map;
+        if (imgMap && imgMap instanceof Map) {
+          for (const [badge, realPath] of imgMap.entries()) {
+            if (realPath.toLowerCase() === match.toLowerCase()) {
+              return badge;
+            }
+          }
+        }
+        return "[Image]";
+      });
+    }
+    return markdown;
+  });
+
+  pi.on("message_update", async (event, ctx) => {
+    if (!ctx.hasUI) return;
+    const ev = event.assistantMessageEvent as any;
+    if (ev) {
+      if (ev.type === "thinking_start" || ev.type === "thinking_delta") {
+        currentAction = "Reasoning";
+      } else if (ev.type === "text_start" || ev.type === "text_delta") {
+        currentAction = "Synthesizing";
+      }
+    }
+  });
+
+  pi.on("tool_execution_start", async (event, ctx) => {
+    if (!ctx.hasUI) return;
+    const tool = event.toolName;
+    if (tool === "read") currentAction = "Reading";
+    else if (tool === "edit" || tool === "write") currentAction = "Writing";
+    else if (tool === "bash") currentAction = "Executing";
+    else if (tool.includes("search") || tool === "find" || tool === "grep") currentAction = "Searching";
+    else currentAction = "Processing";
+    updateWorkingWidget(ctx);
+  });
+
+  pi.on("tool_execution_end", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    currentAction = "Analyzing";
+    updateWorkingWidget(ctx);
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    isBusy = false;
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+    ctx.ui.setWidget("codex-loading", undefined, { placement: "above-editor" });
+    requestTuiRender?.();
+  });
+
+  function updateWorkingWidget(ctx: any) {
+    const elapsedSec = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+    const activeFrame = SPINNER_FRAMES[frameIdx];
+
+    const spinner = ctx.ui.theme.fg("accent", activeFrame);
+    const text = ctx.ui.theme.fg("muted", `${currentAction}… (${elapsedSec}s • <esc> to stop)`);
+    const line = `${spinner} ${text}`;
+
+    ctx.ui.setWidget("codex-loading", [line, ""], { placement: "above-editor" });
+  }
+
+  function initCleanVimUI(ctx: any) {
+    ctx.ui.setWorkingVisible(false);
+
+    ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
+      requestTuiRender = () => tui.requestRender();
+      const unsub = footerData?.onBranchChange?.(() => tui.requestRender());
+
+      return {
+        dispose: unsub || (() => {}),
+        invalidate() {},
+        render(width: number): string[] {
+          // 1. Status Mode: IDLE (Hijau) / BUSY (Kuning)
+          const modeLabel = isBusy ? "BUSY" : "IDLE";
+          const modePart = isBusy
+            ? theme.bold(theme.fg("warning", modeLabel))
+            : theme.bold(theme.fg("success", modeLabel));
+
+          // 2. Model: Nama rapi
+          const rawId = ctx.model?.id || "pi";
+          const cleanModelName = formatModelDisplayName(rawId);
+          const thinking = ctx.thinkingLevel && ctx.thinkingLevel !== "off" ? `:${ctx.thinkingLevel}` : "";
+          const modelPart = theme.fg("text", `${cleanModelName}${thinking}`);
+
+          // 3. Git branch + Git status (+2 ~1 -1)
+          const branch = footerData?.getGitBranch?.() || "";
+          let gitPart = "";
+          if (branch) {
+            const gitDiff = getGitStats();
+            const diffStr = gitDiff ? ` ${theme.fg("warning", gitDiff)}` : "";
+            gitPart = theme.fg("dim", ` ${branch}`) + diffStr;
+          }
+
+          const leftItems = [modePart, modelPart, gitPart].filter(Boolean);
+          const leftLine = " " + leftItems.join("  ");
+
+          // 4. Kanan: Context usage
+          const fmtTokens = (n: number) => {
+            if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+            if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+            return `${n}`;
+          };
+
+          let usedPercent = 0;
+          let tokenStr = "";
+          let contextColorRole: "success" | "warning" | "error" = "success";
+
+          try {
+            const usage = ctx.getContextUsage?.();
+            if (usage) {
+              const tokensUsed = usage.tokens ?? 0;
+              const contextWindow = usage.contextWindow ?? 0;
+
+              usedPercent =
+                typeof usage.percent === "number"
+                  ? Math.min(100, Math.round(usage.percent))
+                  : contextWindow > 0
+                  ? Math.min(100, Math.round((tokensUsed / contextWindow) * 100))
+                  : 0;
+
+              if (contextWindow > 0) {
+                tokenStr = `${fmtTokens(tokensUsed)}/${fmtTokens(contextWindow)}`;
+
+                const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+                const reserveTokens = getCompactionReserveTokens(modelKey);
+                const compactThreshold = Math.max(0, contextWindow - reserveTokens);
+                const ratioToCompact = compactThreshold > 0 ? tokensUsed / compactThreshold : 0;
+
+                if (ratioToCompact >= 0.75 || tokensUsed >= compactThreshold) {
+                  contextColorRole = "error";
+                } else if (ratioToCompact >= 0.40) {
+                  contextColorRole = "warning";
+                } else {
+                  contextColorRole = "success";
+                }
+              }
+            }
+          } catch {}
+
+          const encodingPart = theme.fg("dim", "utf-8");
+          const contextPart = theme.fg(contextColorRole, `ctx ${usedPercent}%${tokenStr ? ` (${tokenStr})` : ""}`);
+
+          const rightItems = [encodingPart, contextPart];
+          const rightLine = rightItems.join("  ") + " ";
+
+          const gap = Math.max(1, width - visibleWidth(leftLine) - visibleWidth(rightLine));
+          const line = leftLine + " ".repeat(gap) + rightLine;
+
+          return [truncateToWidth(line, width)];
+        },
+      };
+    });
+  }
+}

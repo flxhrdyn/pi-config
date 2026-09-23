@@ -1,0 +1,15 @@
+# Secrets & credentials
+auth.json
+models-store.json
+9router-config.json
+*.key
+*.token
+
+# Session history & logs
+sessions/
+*.log
+
+# Binaries, releases & node dependencies
+bin/
+install/
+npm/node_modules/
