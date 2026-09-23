@@ -358,42 +358,49 @@ export default function (pi: ExtensionAPI) {
             pad + p2("████") + "        " + p3("████"),
           ];
 
-          // Format metadata rows (tabular layout ala hephaestus)
-          const leftMargin = width > 70 ? "    " : "  ";
+          // Format metadata rows centered horizontally as a cohesive block
           const TAG_WIDTH = 14;
 
-          const renderRow = (label: string, value: string) => {
-            const tag = `[${label}]`.padEnd(TAG_WIDTH);
-            return `${leftMargin}${theme.fg("dim", tag)}${value}`;
-          };
+          const rowsData = [
+            {
+              label: "Version",
+              val:
+                theme.fg("dim", "Local: ") +
+                theme.fg("text", "v0.87.1") +
+                theme.fg("dim", "  Latest: ") +
+                theme.fg("text", "v0.87.1"),
+              rawLen: TAG_WIDTH + visibleWidth("Local: v0.87.1  Latest: v0.87.1"),
+            },
+            {
+              label: "Model",
+              val: theme.fg("accent", `${modelName}${thinking}`),
+              rawLen: TAG_WIDTH + visibleWidth(`${modelName}${thinking}`),
+            },
+            {
+              label: "Directory",
+              val: theme.fg("text", cleanCwd),
+              rawLen: TAG_WIDTH + visibleWidth(cleanCwd),
+            },
+            {
+              label: "Shortcuts",
+              val:
+                theme.fg("muted", "/help") +
+                theme.fg("dim", " commands  ") +
+                theme.fg("muted", "esc 2x") +
+                theme.fg("dim", " clear  ") +
+                theme.fg("muted", "ctrl+u") +
+                theme.fg("dim", " del-line"),
+              rawLen: TAG_WIDTH + visibleWidth("/help commands  esc 2x clear  ctrl+u del-line"),
+            },
+          ];
 
-          const rows: string[] = [];
+          const maxRowWidth = Math.max(...rowsData.map((r) => r.rawLen));
+          const padMeta = " ".repeat(Math.max(2, Math.floor((width - maxRowWidth) / 2)));
 
-          // [Version]
-          const versionVal =
-            theme.fg("dim", "Local: ") +
-            theme.fg("text", "v0.87.1") +
-            theme.fg("dim", "  Latest: ") +
-            theme.fg("text", "v0.87.1");
-          rows.push(renderRow("Version", versionVal));
-
-          // [Model]
-          const modelVal = theme.fg("accent", `${modelName}${thinking}`);
-          rows.push(renderRow("Model", modelVal));
-
-          // [Directory]
-          const dirVal = theme.fg("text", cleanCwd);
-          rows.push(renderRow("Directory", dirVal));
-
-          // [Shortcuts]
-          const shortcutsVal =
-            theme.fg("muted", "/help") +
-            theme.fg("dim", " commands  ") +
-            theme.fg("muted", "esc 2x") +
-            theme.fg("dim", " clear  ") +
-            theme.fg("muted", "ctrl+u") +
-            theme.fg("dim", " del-line");
-          rows.push(renderRow("Shortcuts", shortcutsVal));
+          const rows = rowsData.map((r) => {
+            const tag = `[${r.label}]`.padEnd(TAG_WIDTH);
+            return `${padMeta}${theme.fg("dim", tag)}${r.val}`;
+          });
 
           const allLines = ["", ...logoLines, "", ...rows, ""];
           return allLines.map((l) => truncateToWidth(l, width));
