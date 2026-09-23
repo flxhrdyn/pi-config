@@ -1,10 +1,11 @@
 {
-  "lastChangelogVersion": "0.87.1",
-  "editorPaddingX": 1,
   "theme": "gruvbox",
   "packages": [
     "npm:pi-9router-ext",
     "npm:pi-sub-agent"
   ],
-  "tuiMode": "fullscreen"
+  "editorPaddingX": 1,
+  "tuiMode": "fullscreen",
+  "quietStartup": true,
+  "lastChangelogVersion": "0.87.1"
 }
