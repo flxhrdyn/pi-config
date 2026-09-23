@@ -385,32 +385,6 @@ export default function (pi: ExtensionAPI) {
           const dirVal = theme.fg("text", cleanCwd);
           rows.push(renderRow("Directory", dirVal));
 
-          // [Context]
-          const contextVal = theme.fg("dim", "AGENTS.md");
-          rows.push(renderRow("Context", contextVal));
-
-          // [Skills]
-          const skillsList = [
-            "brainstorming",
-            "systematic-debugging",
-            "test-driven-development",
-            "verification-before-completion",
-            "writing-plans",
-          ];
-          const skillsVal = skillsList.map((s) => theme.fg("dim", s)).join("  ");
-          rows.push(renderRow("Skills", skillsVal));
-
-          // [Extensions]
-          const extsList = ["custom-footer", "themes", "pi-9router-ext", "pi-sub-agent"];
-          const extsVal = extsList.map((e) => theme.fg("dim", e)).join("  ");
-          rows.push(renderRow("Extensions", extsVal));
-
-          // [Themes]
-          const themesVal =
-            theme.fg("success", themeName) +
-            theme.fg("dim", "  (use /themes to change)");
-          rows.push(renderRow("Themes", themesVal));
-
           // [Shortcuts]
           const shortcutsVal =
             theme.fg("muted", "/help") +
