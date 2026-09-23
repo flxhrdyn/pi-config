@@ -115,6 +115,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     initCleanVimUI(ctx);
+    initCustomHeader(ctx);
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -312,6 +313,60 @@ export default function (pi: ExtensionAPI) {
           const line = leftLine + " ".repeat(gap) + rightLine;
 
           return [truncateToWidth(line, width)];
+        },
+      };
+    });
+  }
+
+  // Header Minimalis: 3-piece geometric Pi logo adaptif ke theme
+  function initCustomHeader(ctx: any) {
+    if (!ctx.ui?.setHeader) return;
+
+    ctx.ui.setHeader((_tui: any, theme: any) => {
+      return {
+        dispose() {},
+        invalidate() {},
+        render(width: number): string[] {
+          const cwd = process.cwd();
+          const home = os.homedir();
+          const cleanCwd = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+          const rawId = ctx.model?.id || "pi";
+          const modelName = formatModelDisplayName(rawId);
+          const thinking = ctx.thinkingLevel && ctx.thinkingLevel !== "off" ? ` (${ctx.thinkingLevel})` : "";
+          const themeName = ctx.ui?.theme?.name || "default";
+
+          // 3-Piece Geometric Pi Logo (Coral / Blue / Yellow)
+          // Piece 1 (Top arch): syntaxKeyword
+          // Piece 2 (Left stem & arm): syntaxFunction
+          // Piece 3 (Right pillar): warning
+          const p1 = (txt: string) => theme.bold(theme.fg("syntaxKeyword", txt));
+          const p2 = (txt: string) => theme.bold(theme.fg("syntaxFunction", txt));
+          const p3 = (txt: string) => theme.bold(theme.fg("warning", txt));
+
+          const logo = [
+            p1("█████████"),
+            p2("███") + "   " + p1("███"),
+            p2("██████") + "   " + p3("███"),
+            p2("███") + "      " + p3("███"),
+          ];
+
+          const info = [
+            theme.bold(theme.fg("text", "pi-coding-agent")) + theme.fg("dim", ` v0.87.1 [${themeName}]`),
+            theme.fg("dim", "cwd   ") + theme.fg("text", cleanCwd),
+            theme.fg("dim", "model ") + theme.fg("accent", `${modelName}${thinking}`),
+            theme.fg("dim", "keys  ") + theme.fg("muted", "/help") + theme.fg("dim", " commands · ") + theme.fg("muted", "esc 2x") + theme.fg("dim", " clear"),
+          ];
+
+          const lines = [
+            "",
+            `  ${logo[0]}     ${info[0]}`,
+            `  ${logo[1]}     ${info[1]}`,
+            `  ${logo[2]}     ${info[2]}`,
+            `  ${logo[3]}     ${info[3]}`,
+            "",
+          ];
+
+          return lines.map((l) => truncateToWidth(l, width));
         },
       };
     });
