@@ -318,7 +318,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // Header Minimalis: 3-piece geometric Pi logo adaptif ke theme
+  // Header Minimalis: Centered 3-piece Pi logo dengan layout tabular clean
   function initCustomHeader(ctx: any) {
     if (!ctx.ui?.setHeader) return;
 
@@ -333,7 +333,7 @@ export default function (pi: ExtensionAPI) {
           const rawId = ctx.model?.id || "pi";
           const modelName = formatModelDisplayName(rawId);
           const thinking = ctx.thinkingLevel && ctx.thinkingLevel !== "off" ? ` (${ctx.thinkingLevel})` : "";
-          const themeName = ctx.ui?.theme?.name || "default";
+          const themeName = ctx.ui?.theme?.name || "gruvbox";
 
           // 3-Piece Geometric Pi Logo (Coral / Blue / Yellow)
           // Piece 1 (Top arch): syntaxKeyword
@@ -343,30 +343,86 @@ export default function (pi: ExtensionAPI) {
           const p2 = (txt: string) => theme.bold(theme.fg("syntaxFunction", txt));
           const p3 = (txt: string) => theme.bold(theme.fg("warning", txt));
 
-          const logo = [
-            p1("█████████"),
-            p2("███") + "   " + p1("███"),
-            p2("██████") + "   " + p3("███"),
-            p2("███") + "      " + p3("███"),
+          // Center logo horizontally (logo width = 16 characters)
+          const padLeft = Math.max(2, Math.floor((width - 16) / 2));
+          const pad = " ".repeat(padLeft);
+
+          const logoLines = [
+            pad + p1("████████████"),
+            pad + p1("████████████"),
+            pad + p2("████") + "    " + p1("████"),
+            pad + p2("████") + "    " + p1("████"),
+            pad + p2("████████") + "    " + p3("████"),
+            pad + p2("████████") + "    " + p3("████"),
+            pad + p2("████") + "        " + p3("████"),
+            pad + p2("████") + "        " + p3("████"),
           ];
 
-          const info = [
-            theme.bold(theme.fg("text", "pi-coding-agent")) + theme.fg("dim", ` v0.87.1 [${themeName}]`),
-            theme.fg("dim", "cwd   ") + theme.fg("text", cleanCwd),
-            theme.fg("dim", "model ") + theme.fg("accent", `${modelName}${thinking}`),
-            theme.fg("dim", "keys  ") + theme.fg("muted", "/help") + theme.fg("dim", " commands · ") + theme.fg("muted", "esc 2x") + theme.fg("dim", " clear"),
-          ];
+          // Format metadata rows (tabular layout ala hephaestus)
+          const leftMargin = width > 70 ? "    " : "  ";
+          const TAG_WIDTH = 14;
 
-          const lines = [
-            "",
-            `  ${logo[0]}     ${info[0]}`,
-            `  ${logo[1]}     ${info[1]}`,
-            `  ${logo[2]}     ${info[2]}`,
-            `  ${logo[3]}     ${info[3]}`,
-            "",
-          ];
+          const renderRow = (label: string, value: string) => {
+            const tag = `[${label}]`.padEnd(TAG_WIDTH);
+            return `${leftMargin}${theme.fg("dim", tag)}${value}`;
+          };
 
-          return lines.map((l) => truncateToWidth(l, width));
+          const rows: string[] = [];
+
+          // [Version]
+          const versionVal =
+            theme.fg("dim", "Local: ") +
+            theme.fg("text", "v0.87.1") +
+            theme.fg("dim", "  Latest: ") +
+            theme.fg("text", "v0.87.1");
+          rows.push(renderRow("Version", versionVal));
+
+          // [Model]
+          const modelVal = theme.fg("accent", `${modelName}${thinking}`);
+          rows.push(renderRow("Model", modelVal));
+
+          // [Directory]
+          const dirVal = theme.fg("text", cleanCwd);
+          rows.push(renderRow("Directory", dirVal));
+
+          // [Context]
+          const contextVal = theme.fg("dim", "AGENTS.md");
+          rows.push(renderRow("Context", contextVal));
+
+          // [Skills]
+          const skillsList = [
+            "brainstorming",
+            "systematic-debugging",
+            "test-driven-development",
+            "verification-before-completion",
+            "writing-plans",
+          ];
+          const skillsVal = skillsList.map((s) => theme.fg("dim", s)).join("  ");
+          rows.push(renderRow("Skills", skillsVal));
+
+          // [Extensions]
+          const extsList = ["custom-footer", "themes", "pi-9router-ext", "pi-sub-agent"];
+          const extsVal = extsList.map((e) => theme.fg("dim", e)).join("  ");
+          rows.push(renderRow("Extensions", extsVal));
+
+          // [Themes]
+          const themesVal =
+            theme.fg("success", themeName) +
+            theme.fg("dim", "  (use /themes to change)");
+          rows.push(renderRow("Themes", themesVal));
+
+          // [Shortcuts]
+          const shortcutsVal =
+            theme.fg("muted", "/help") +
+            theme.fg("dim", " commands  ") +
+            theme.fg("muted", "esc 2x") +
+            theme.fg("dim", " clear  ") +
+            theme.fg("muted", "ctrl+u") +
+            theme.fg("dim", " del-line");
+          rows.push(renderRow("Shortcuts", shortcutsVal));
+
+          const allLines = ["", ...logoLines, "", ...rows, ""];
+          return allLines.map((l) => truncateToWidth(l, width));
         },
       };
     });
