@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node ./npm/node_modules/vitest/vitest.mjs run",
+    "test": "node ./npm/node_modules/vitest/vitest.mjs run --exclude=**/tests/e2e/**",
+    "test:e2e": "node ./npm/node_modules/vitest/vitest.mjs run tests/e2e/e2e-harness.test.ts",
     "typecheck": "node ./npm/node_modules/typescript/bin/tsc --noEmit",
     "lint": "node ./scripts/lint.mjs"
   }

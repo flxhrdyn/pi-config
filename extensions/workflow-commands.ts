@@ -8,6 +8,32 @@ import type {
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import {
+  safePostJson,
+  validateEndpointUrl,
+  resolveSecureApiKey,
+  sanitizeErrorMessage,
+  isExternalOptInEnabled,
+} from "./security-guard.js";
+import {
+  type CommandIntent,
+  notifyStateFallback,
+  parseBuildIntent,
+  parsePlanIntent,
+  parseDebugIntent,
+  parseReviewIntent,
+  parseBtwIntent,
+} from "./command-intent.js";
+
+export {
+  type CommandIntent,
+  notifyStateFallback,
+  parseBuildIntent,
+  parsePlanIntent,
+  parseDebugIntent,
+  parseReviewIntent,
+  parseBtwIntent,
+};
 
 // ============================================================================
 // Types and Schemas
@@ -36,6 +62,15 @@ export interface WorkflowPlanV1 {
   errorSummary?: string;
 }
 
+export interface BtwActivity {
+  id: string;
+  question: string;
+  answer?: string;
+  status: "pending" | "answered" | "failed";
+  error?: string;
+  timestamp: string;
+}
+
 export interface BtwQueueItem {
   id: string;
   question: string;
@@ -44,14 +79,16 @@ export interface BtwQueueItem {
 }
 
 export interface SessionWorkflowState {
+  sessionId: string;
+  cwd: string;
   activeMode: WorkflowMode;
-  currentPlan: WorkflowPlanV1 | null;
+  currentPlan?: WorkflowPlanV1;
   btwActive: boolean;
-  btwAbortController: AbortController | null;
   btwQueue: BtwQueueItem[];
+  btwAbortController: AbortController | null;
+  btwHistory: BtwActivity[];
 }
 
-// Read-only tools allowlist in /plan and /review modes
 export const READ_ONLY_TOOL_ALLOWLIST = new Set<string>([
   "read",
   "grep",
@@ -59,78 +96,33 @@ export const READ_ONLY_TOOL_ALLOWLIST = new Set<string>([
   "ls",
 ]);
 
-// Helper terminal text width measurement
-export function getVisibleWidth(str: string): number {
-  if (!str) return 0;
-  const clean = str.replace(/\x1b\[[0-9;]*m/g, "");
-  let len = 0;
-  for (const ch of clean) {
-    const code = ch.codePointAt(0) || 0;
-    if (
-      (code >= 0x1100 && code <= 0x115f) ||
-      (code >= 0x2e80 && code <= 0xa4cf) ||
-      (code >= 0xac00 && code <= 0xd7a3) ||
-      (code >= 0xf900 && code <= 0xfaff) ||
-      (code >= 0xfe10 && code <= 0xfe19) ||
-      (code >= 0xfe30 && code <= 0xfe6f) ||
-      (code >= 0xff00 && code <= 0xff60) ||
-      (code >= 0xffe0 && code <= 0xffe6)
-    ) {
-      len += 2;
-    } else {
-      len += 1;
-    }
-  }
-  return len;
-}
-
-export function wrapText(text: string, maxW: number): string[] {
-  const words = text.split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let cur = "";
-  for (const w of words) {
-    if (!cur) {
-      cur = w;
-    } else if (getVisibleWidth(cur + " " + w) <= maxW) {
-      cur += " " + w;
-    } else {
-      lines.push(cur);
-      cur = w;
-    }
-  }
-  if (cur) lines.push(cur);
-  return lines;
-}
-
-// ============================================================================
-// State Management & Atomic File Persistence
-// ============================================================================
-
+// Map session state scoped per sessionId + canonical cwd
 const sessionStates = new Map<string, SessionWorkflowState>();
 
-export function getSessionKey(sessionId: string | undefined, cwd: string): string {
-  const safeSessionId = sessionId && sessionId.trim() ? sessionId.trim() : "default-session";
-  const safeCwd = path.resolve(cwd || process.cwd());
-  return `${safeSessionId}:::${safeCwd}`;
+function getSessionKey(sessionId: string, cwd: string): string {
+  return `${sessionId}:::${path.resolve(cwd)}`;
 }
 
-export function getOrCreateSessionState(sessionId: string | undefined, cwd: string): SessionWorkflowState {
+export function getOrCreateSessionState(sessionId: string, cwd: string): SessionWorkflowState {
   const key = getSessionKey(sessionId, cwd);
   let state = sessionStates.get(key);
   if (!state) {
     state = {
+      sessionId,
+      cwd: path.resolve(cwd),
       activeMode: "idle",
-      currentPlan: null,
       btwActive: false,
-      btwAbortController: null,
       btwQueue: [],
+      btwAbortController: null,
+      btwHistory: [],
     };
     sessionStates.set(key, state);
   }
   return state;
 }
 
-export function resetSessionWorkflowState(sessionId: string | undefined, cwd: string): void {
+export function resetSessionWorkflowState(sessionId?: string, cwd?: string): void {
+  if (!sessionId || !cwd) return;
   const key = getSessionKey(sessionId, cwd);
   const state = sessionStates.get(key);
   if (state) {
@@ -155,54 +147,54 @@ export function clearAllSessionWorkflowStates(): void {
 
 export function validatePlanSchema(data: unknown): { valid: true; plan: WorkflowPlanV1 } | { valid: false; error: string } {
   if (typeof data !== "object" || data === null) {
-    return { valid: false, error: "Root data harus berupa object JSON" };
+    return { valid: false, error: "Root data must be a JSON object" };
   }
 
   const obj = data as Record<string, unknown>;
 
   if (obj.schemaVersion !== 1) {
-    return { valid: false, error: `Versi skema tidak didukung: ${String(obj.schemaVersion)} (diharapkan: 1)` };
+    return { valid: false, error: `Unsupported schema version: ${String(obj.schemaVersion)} (expected: 1)` };
   }
   if (typeof obj.sessionId !== "string" || !obj.sessionId.trim()) {
-    return { valid: false, error: "Field 'sessionId' wajib berupa string non-kosong" };
+    return { valid: false, error: "Field 'sessionId' must be a non-empty string" };
   }
   if (typeof obj.cwd !== "string" || !obj.cwd.trim()) {
-    return { valid: false, error: "Field 'cwd' wajib berupa string non-kosong" };
+    return { valid: false, error: "Field 'cwd' must be a non-empty string" };
   }
   if (typeof obj.goal !== "string" || !obj.goal.trim()) {
-    return { valid: false, error: "Field 'goal' wajib berupa string non-kosong" };
+    return { valid: false, error: "Field 'goal' must be a non-empty string" };
   }
 
   const validStatuses: PlanStatus[] = ["draft", "approved", "running", "completed", "failed"];
   if (typeof obj.status !== "string" || !validStatuses.includes(obj.status as PlanStatus)) {
-    return { valid: false, error: `Field 'status' tidak valid: '${String(obj.status)}'` };
+    return { valid: false, error: `Invalid 'status' field: '${String(obj.status)}'` };
   }
 
   if (typeof obj.planCaptured !== "boolean") {
-    return { valid: false, error: "Field 'planCaptured' wajib berupa boolean" };
+    return { valid: false, error: "Field 'planCaptured' must be a boolean" };
   }
   const validSources: PlanContentSource[] = ["agent", "draft_placeholder"];
   if (typeof obj.contentSource !== "string" || !validSources.includes(obj.contentSource as PlanContentSource)) {
-    return { valid: false, error: `Field 'contentSource' tidak valid: '${String(obj.contentSource)}'` };
+    return { valid: false, error: `Invalid 'contentSource' field: '${String(obj.contentSource)}'` };
   }
 
   if (!Array.isArray(obj.steps)) {
-    return { valid: false, error: "Field 'steps' wajib berupa array string" };
+    return { valid: false, error: "Field 'steps' must be an array of strings" };
   }
   if (!Array.isArray(obj.risks)) {
-    return { valid: false, error: "Field 'risks' wajib berupa array string" };
+    return { valid: false, error: "Field 'risks' must be an array of strings" };
   }
   if (!Array.isArray(obj.acceptanceCriteria)) {
-    return { valid: false, error: "Field 'acceptanceCriteria' wajib berupa array string" };
+    return { valid: false, error: "Field 'acceptanceCriteria' must be an array of strings" };
   }
   if (!Array.isArray(obj.verificationCommands)) {
-    return { valid: false, error: "Field 'verificationCommands' wajib berupa array string" };
+    return { valid: false, error: "Field 'verificationCommands' must be an array of strings" };
   }
   if (typeof obj.createdAt !== "string") {
-    return { valid: false, error: "Field 'createdAt' wajib berupa string ISO" };
+    return { valid: false, error: "Field 'createdAt' must be an ISO date string" };
   }
   if (typeof obj.updatedAt !== "string") {
-    return { valid: false, error: "Field 'updatedAt' wajib berupa string ISO" };
+    return { valid: false, error: "Field 'updatedAt' must be an ISO date string" };
   }
 
   const plan: WorkflowPlanV1 = {
@@ -245,7 +237,7 @@ export function savePlanAtomic(cwd: string, plan: WorkflowPlanV1): { success: bo
     return { success: true };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: `Gagal menyimpan plan secara atomik: ${msg}` };
+    return { success: false, error: `Failed to save plan atomically: ${msg}` };
   }
 }
 
@@ -265,7 +257,7 @@ export function loadPlanValidated(
     raw = fs.readFileSync(planFile, "utf8");
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { plan: null, diagnostic: `Tidak dapat membaca file .pi/active-plan.json: ${msg}` };
+    return { plan: null, diagnostic: `Cannot read file .pi/active-plan.json: ${msg}` };
   }
 
   let parsed: unknown;
@@ -275,7 +267,21 @@ export function loadPlanValidated(
     const msg = err instanceof Error ? err.message : String(err);
     return {
       plan: null,
-      diagnostic: `File .pi/active-plan.json rusak (invalid JSON): ${msg}. Silakan perbaiki atau buat ulang via /plan <tujuan>.`,
+      diagnostic: `File .pi/active-plan.json is corrupted (invalid JSON): ${msg}. Please fix or recreate via /plan <goal>.`,
+    };
+  }
+
+  // Detect unversioned legacy plan file
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    !("schemaVersion" in parsed) &&
+    typeof (parsed as Record<string, any>).goal === "string"
+  ) {
+    return {
+      plan: null,
+      diagnostic:
+        "File .pi/active-plan.json is in legacy format (missing schemaVersion). Run '/plan migrate' to upgrade it to schema version 1, or recreate via /plan <goal>.",
     };
   }
 
@@ -283,36 +289,120 @@ export function loadPlanValidated(
   if (!validation.valid) {
     return {
       plan: null,
-      diagnostic: `File .pi/active-plan.json tidak sesuai skema (${validation.error}). Silakan buat ulang via /plan <tujuan>.`,
+      diagnostic: `File .pi/active-plan.json does not match schema (${validation.error}). Please recreate via /plan <goal>.`,
     };
   }
 
   const loadedPlan = validation.plan;
 
-  // Verifikasi cwd harus cocok persis dengan canonical path
+  // Verify canonical cwd
   if (path.resolve(loadedPlan.cwd) !== path.resolve(cwd)) {
     return {
       plan: null,
-      diagnostic: `Plan tersimpan ditujukan untuk direktori lain ('${loadedPlan.cwd}'), bukan direktori aktif saat ini ('${path.resolve(cwd)}').`,
+      diagnostic: `Saved plan is designated for another directory ('${loadedPlan.cwd}'), not the active directory ('${path.resolve(cwd)}').`,
     };
   }
 
-  // Verifikasi session ID bila disediakan
+  // Verify session ID when provided
   if (expectedSessionId && loadedPlan.sessionId !== expectedSessionId) {
     return {
       plan: null,
-      diagnostic: `Plan tersimpan dibuat pada sesi lain ('${loadedPlan.sessionId}'). Buat rencana baru untuk sesi ini via /plan.`,
+      diagnostic: `Saved plan was created in another session ('${loadedPlan.sessionId}'). Create a new plan for this session via /plan <goal>.`,
     };
   }
 
   return { plan: loadedPlan };
 }
 
+/**
+ * Explicit migration helper for legacy active-plan files
+ */
+export function migrateLegacyPlan(
+  cwd: string,
+  sessionId: string
+): { success: boolean; plan?: WorkflowPlanV1; message: string } {
+  const planDir = path.join(path.resolve(cwd), ".pi");
+  const planFile = path.join(planDir, "active-plan.json");
+
+  if (!fs.existsSync(planFile)) {
+    return { success: false, message: "No .pi/active-plan.json file found to migrate." };
+  }
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(planFile, "utf8");
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, message: `Cannot read file .pi/active-plan.json: ${msg}` };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      message: `File .pi/active-plan.json is corrupted (invalid JSON): ${msg}. Format is invalid and cannot be migrated automatically. Recreate via /plan <goal>.`,
+    };
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    return { success: false, message: "File .pi/active-plan.json is not a valid JSON object." };
+  }
+
+  const rawObj = parsed as Record<string, any>;
+  if (rawObj.schemaVersion === 1) {
+    const validRes = validatePlanSchema(rawObj);
+    if (validRes.valid) {
+      return {
+        success: true,
+        plan: validRes.plan,
+        message: "File .pi/active-plan.json already conforms to schema version 1.",
+      };
+    }
+  }
+
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedSessionId = sessionId || rawObj.sessionId || "migrated-session";
+
+  const migratedPlan: WorkflowPlanV1 = {
+    schemaVersion: 1,
+    sessionId: resolvedSessionId,
+    cwd: resolvedCwd,
+    goal: typeof rawObj.goal === "string" && rawObj.goal.trim() ? rawObj.goal.trim() : "Migrated Plan",
+    status: (rawObj.status as PlanStatus) || "draft",
+    planCaptured: typeof rawObj.planCaptured === "boolean" ? rawObj.planCaptured : true,
+    contentSource: "agent",
+    steps: Array.isArray(rawObj.steps) ? rawObj.steps.map(String) : [],
+    risks: Array.isArray(rawObj.risks) ? rawObj.risks.map(String) : [],
+    acceptanceCriteria: Array.isArray(rawObj.acceptanceCriteria) ? rawObj.acceptanceCriteria.map(String) : [],
+    verificationCommands: Array.isArray(rawObj.verificationCommands)
+      ? rawObj.verificationCommands.map(String)
+      : rawObj.verificationCommand
+      ? [String(rawObj.verificationCommand)]
+      : ["npm test"],
+    createdAt: typeof rawObj.createdAt === "string" ? rawObj.createdAt : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const saveRes = savePlanAtomic(cwd, migratedPlan);
+  if (!saveRes.success) {
+    return { success: false, message: saveRes.error || "Failed to save migrated plan." };
+  }
+
+  return {
+    success: true,
+    plan: migratedPlan,
+    message: `Plan '${migratedPlan.goal}' was successfully migrated to schema version 1.`,
+  };
+}
+
 // Parse structured plan generated by the model
 export function parseStructuredPlanFromAssistantText(text: string): Partial<WorkflowPlanV1> | null {
   if (!text) return null;
 
-  // 1. Coba cari JSON code block
+  // 1. Try JSON code block
   const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (jsonMatch) {
     try {
@@ -325,17 +415,17 @@ export function parseStructuredPlanFromAssistantText(text: string): Partial<Work
           acceptanceCriteria: Array.isArray(p.acceptanceCriteria) ? p.acceptanceCriteria.map(String) : [],
           verificationCommands: Array.isArray(p.verificationCommands)
             ? p.verificationCommands.map(String)
-            : Array.isArray(p.verification)
-            ? p.verification.map(String)
+            : Array.isArray(p.verificationCommand)
+            ? p.verificationCommand.map(String)
+            : typeof p.verificationCommand === "string"
+            ? [p.verificationCommand]
             : ["npm test"],
         };
       }
-    } catch {
-      // Fallback ke parser markdown
-    }
+    } catch {}
   }
 
-  // 2. Parser markdown berbasis heading (Steps, Risks, Criteria, Verification)
+  // 2. Markdown heading parser (Steps, Risks, Criteria, Verification)
   const steps: string[] = [];
   const risks: string[] = [];
   const criteria: string[] = [];
@@ -352,10 +442,10 @@ export function parseStructuredPlanFromAssistantText(text: string): Partial<Work
     } else if (/^#{1,4}\s*.*(risk|risiko|hazard)/i.test(heading)) {
       currentSection = "risks";
       continue;
-    } else if (/^#{1,4}\s*.*(criteria|kriteria|acceptance|selesai)/i.test(heading)) {
+    } else if (/^#{1,4}\s*.*(criteria|kriteria|acceptance|done)/i.test(heading)) {
       currentSection = "criteria";
       continue;
-    } else if (/^#{1,4}\s*.*(verif|test|perintah|command)/i.test(heading)) {
+    } else if (/^#{1,4}\s*.*(verif|test|command)/i.test(heading)) {
       currentSection = "commands";
       continue;
     }
@@ -421,7 +511,7 @@ export function extractSanitizedContext(entries: unknown[]): string {
       rawText = entry.message.content;
     }
 
-    // Sanitasi data sensitif (API key, authorization header, password)
+    // Sanitize sensitive tokens
     const sanitized = rawText
       .replace(/sk[_-][a-zA-Z0-9_-]{20,}/g, "[REDACTED_API_KEY]")
       .replace(/Bearer\s+[a-zA-Z0-9_.-]+/gi, "Bearer [REDACTED_TOKEN]")
@@ -438,7 +528,7 @@ export function extractSanitizedContext(entries: unknown[]): string {
 }
 
 // ============================================================================
-// Provider Query with Guaranteed Timeout Cleanup
+// Provider Query with Guaranteed Timeout Cleanup & Security Guard
 // ============================================================================
 
 export interface ProviderEndpointConfig {
@@ -449,40 +539,38 @@ export interface ProviderEndpointConfig {
 
 export function resolveProviderEndpoint(): ProviderEndpointConfig | null {
   const envUrl = process.env.PI_BTW_URL || process.env.NINE_ROUTER_BASE_URL;
-  const envKey = process.env.PI_BTW_API_KEY || process.env.NINE_ROUTER_API_KEY;
   const envModel = process.env.PI_BTW_MODEL;
 
-  if (envUrl) {
-    try {
-      const parsed = new URL(envUrl);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        return {
-          baseUrl: parsed.origin,
-          apiKey: envKey,
-          model: envModel || "ag/gemini-3.8-flash-low",
-        };
-      }
-    } catch {}
-  }
-
-  const configPath = path.join(os.homedir(), ".pi", "agent", "9router-config.json");
-  if (fs.existsSync(configPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      if (cfg && typeof cfg.baseUrl === "string") {
-        const parsed = new URL(cfg.baseUrl);
-        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-          return {
-            baseUrl: parsed.origin,
-            apiKey: typeof cfg.apiKey === "string" ? cfg.apiKey : undefined,
-            model: envModel || "ag/gemini-3.8-flash-low",
-          };
+  let rawUrl = envUrl;
+  if (!rawUrl) {
+    const configPath = path.join(os.homedir(), ".pi", "agent", "9router-config.json");
+    if (fs.existsSync(configPath)) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        if (typeof cfg?.baseUrl === "string") {
+          rawUrl = cfg.baseUrl;
         }
-      }
-    } catch {}
+      } catch {}
+    }
   }
 
-  return null;
+  if (!rawUrl) {
+    rawUrl = "http://127.0.0.1:20128";
+  }
+
+  const allowExternal = isExternalOptInEnabled();
+  const validation = validateEndpointUrl(rawUrl, allowExternal);
+  if (!validation.valid || !validation.url) {
+    return null;
+  }
+
+  const secret = resolveSecureApiKey();
+
+  return {
+    baseUrl: validation.url.origin,
+    apiKey: secret.apiKey,
+    model: envModel || "ag/gemini-3.8-flash-low",
+  };
 }
 
 export async function queryBtwAnswer(
@@ -496,87 +584,57 @@ export async function queryBtwAnswer(
     return {
       success: false,
       answer: "",
-      error: "Endpoint AI lokal tidak ditemukan. Konfigurasikan ~/.pi/agent/9router-config.json atau PI_BTW_URL.",
+      error: "AI endpoint rejected or invalid under security allowlist policy.",
     };
   }
 
-  const internalController = new AbortController();
-  const onExternalAbort = () => internalController.abort();
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      return { success: false, answer: "", error: "Dibatalkan oleh user" };
-    }
-    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
-  }
-
-  // Timer mencakup seluruh siklus fetch + pembacaan body json()
-  let timer: NodeJS.Timeout | null = null;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      internalController.abort();
-      reject(new Error("Timeout permintaan model"));
-    }, timeoutMs);
-  });
-
   const prompt = [
-    contextSummary ? `Konteks kerja saat ini: "${contextSummary}"` : "",
-    `Pertanyaan sampingan user: "${question}"`,
+    contextSummary ? `Current workflow context: "${contextSummary}"` : "",
+    `User side question: "${question}"`,
     ``,
-    `Instruksi:`,
-    `- Jawab pertanyaan sampingan secara langsung, ringkas, dan jelas dalam 1 hingga 2 paragraf pendek.`,
-    `- Gunakan bahasa yang sama dengan pertanyaan user.`,
-    `- Jangan sertakan salam pembuka/penutup. Langsung berikan penjelasan esensial.`,
+    `Instructions:`,
+    `- Answer the side question directly, concisely, and clearly in 1 or 2 short paragraphs.`,
+    `- Match the language of the user's question.`,
+    `- Provide essential explanation directly without opening or closing greetings.`,
   ].filter(Boolean).join("\n");
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+  const targetUrl = `${provider.baseUrl}/v1/chat/completions`;
+  const payload = {
+    model: provider.model,
+    stream: false,
+    max_tokens: 300,
+    messages: [{ role: "user", content: prompt }],
   };
-  if (provider.apiKey) {
-    headers.Authorization = `Bearer ${provider.apiKey}`;
-  }
 
-  try {
-    const fetchPromise = (async () => {
-      const res = await fetch(`${provider.baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: provider.model,
-          stream: false,
-          max_tokens: 300,
-          messages: [{ role: "user", content: prompt }],
-        }),
-        signal: internalController.signal,
-      });
+  const res = await safePostJson<{ choices?: Array<{ message?: { content?: string } }> }>(
+    targetUrl,
+    payload,
+    provider.apiKey,
+    {
+      timeoutMs,
+      externalSignal,
+      allowExternal: isExternalOptInEnabled(),
+    }
+  );
 
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      }
-
-      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const content = data.choices?.[0]?.message?.content;
-      if (typeof content !== "string" || !content.trim()) {
-        throw new Error("Respon model kosong");
-      }
-      return content.trim();
-    })();
-
-    const result = await Promise.race([fetchPromise, timeoutPromise]);
-    return { success: true, answer: result };
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const isAborted = internalController.signal.aborted || (externalSignal?.aborted ?? false);
+  if (!res.success || !res.data) {
     return {
       success: false,
       answer: "",
-      error: isAborted ? "Permintaan dibatalkan atau melebihi batas waktu (timeout)" : msg,
+      error: res.error || "Failed to query side model.",
     };
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (externalSignal) {
-      externalSignal.removeEventListener("abort", onExternalAbort);
-    }
   }
+
+  const content = res.data.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    return {
+      success: false,
+      answer: "",
+      error: "Empty model response.",
+    };
+  }
+
+  return { success: true, answer: content.trim() };
 }
 
 // ============================================================================
@@ -586,75 +644,84 @@ export async function queryBtwAnswer(
 export function formatPlanPrompt(goal: string): string {
   return [
     `[WORKFLOW MODE: /plan]`,
-    `Tujuan Rencana: "${goal}"`,
+    `Plan Goal: "${goal}"`,
     ``,
-    `ATURAN KETAT MODE READ-ONLY (SCOUTING):`,
-    `1. Eksplorasi repositori secara READ-ONLY. Baca berkas, cari referensi, dan periksa struktur tes.`,
-    `2. Jangan mengubah, menulis, atau menghapus file source code. Semua tool mutasi (edit, write, bash, powershell) diblokir. Mode ini tidak mengubah source code (hanya menyimpan metadata rencana di .pi/active-plan.json).`,
-    `3. Susun rencana terstruktur yang memuat langkah (Steps), risiko & mitigasi (Risks), kriteria selesai (Acceptance Criteria), dan perintah verifikasi (Verification Commands).`,
-    `4. Akhiri respon Anda dengan blok JSON terstruktur berikut agar sistem dapat menangkap detail rencana secara otomatis:`,
+    `STRICT READ-ONLY SCOUTING RULES:`,
+    `1. Explore repository strictly READ-ONLY. Read files, search references, inspect test setups.`,
+    `2. Do not modify, write, or delete source code files. All mutation tools (edit, write, bash, powershell) are blocked. This mode does not alter source code (only saves plan metadata to .pi/active-plan.json).`,
+    `3. Produce a structured plan containing Steps, Risks & Mitigations, Acceptance Criteria, and Verification Commands.`,
+    `4. Conclude your response with the following structured JSON block so the system can capture plan details automatically:`,
     `\`\`\`json`,
     `{`,
     `  "plan": {`,
-    `    "steps": ["langkah 1...", "langkah 2..."],`,
-    `    "risks": ["risiko 1..."],`,
-    `    "acceptanceCriteria": ["kriteria 1..."],`,
+    `    "steps": ["step 1...", "step 2..."],`,
+    `    "risks": ["risk 1..."],`,
+    `    "acceptanceCriteria": ["criteria 1..."],`,
     `    "verificationCommands": ["npm test"]`,
     `  }`,
     `}`,
     `\`\`\``,
-    `Setelah rencana selesai diulas, user dapat menyetujuinya via '/plan approve' lalu menjalankannya via '/build'.`,
+    `After reviewing the plan, the user can approve it via '/plan approve' and execute it via '/build'.`,
+  ].join("\n");
+}
+
+export function formatDirectBuildPrompt(task: string): string {
+  return [
+    `[WORKFLOW MODE: /build]`,
+    `Direct Task: "${task}"`,
+    ``,
+    `DIRECT EXECUTION RULES:`,
+    `1. Treat the above task as the primary source of truth.`,
+    `2. Implement changes step by step in an incremental, measured manner.`,
+    `3. Run narrow tests or checks after every significant change.`,
+    `4. Report modified files and verification results.`,
   ].join("\n");
 }
 
 export function formatBuildPrompt(plan: WorkflowPlanV1): string {
   return [
     `[WORKFLOW MODE: /build]`,
-    `Mengeksekusi Rencana yang Disetujui: "${plan.goal}"`,
+    `Executing Approved Plan: "${plan.goal}"`,
     ``,
-    `Rincian Rencana:`,
-    `Langkah Implementasi:`,
+    `Plan Details:`,
+    `Implementation Steps:`,
     ...plan.steps.map((s, idx) => `  ${idx + 1}. ${s}`),
-    `Kriteria Penerimaan:`,
+    `Acceptance Criteria:`,
     ...plan.acceptanceCriteria.map((c) => `  - ${c}`),
-    `Perintah Verifikasi:`,
+    `Verification Commands:`,
     ...plan.verificationCommands.map((v) => `  $ ${v}`),
     ``,
-    `ATURAN EKSEKUSI:`,
-    `1. Implementasikan langkah demi langkah. Jangan melompat tanpa pengujian.`,
-    `2. Jalankan verifikasi/tes setelah tiap langkah selesai.`,
-    `3. Buat checkpoint dan pastikan tes berhasil sebelum melangkah ke tahap berikutnya.`,
+    `EXECUTION RULES:`,
+    `1. Implement step by step. Do not jump ahead without verification.`,
+    `2. Run tests or checks after each step finishes.`,
+    `3. Create checkpoints and confirm tests pass before proceeding to the next step.`,
   ].join("\n");
 }
 
 export function formatDebugPrompt(issue: string): string {
   return [
     `[WORKFLOW MODE: /debug]`,
-    `Laporan Masalah: "${issue}"`,
+    `Reported Issue: "${issue}"`,
     ``,
-    `5 TAHAP WORKFLOW DEBUGGING SISTEMATIS (WAJIB DIIKUTI SECARA BERURUTAN):`,
-    `1. REPRODUCE: Reproduksi kegagalan dengan pengujian atau pemeriksaan tersempit sebelum menyentuh kode.`,
-    `2. ROOT CAUSE INVESTIGATION: Telusuri alur data, call stack, dan error log. JANGAN menebak atau langsung mengubah kode!`,
-    `3. HYPOTHESIS: Nyatakan satu hipotesis akar penyebab secara gamblang dan terverifikasi.`,
-    `4. MINIMAL FIX: Buat perubahan paling kecil dan aman yang secara presisi menyelesaikan akar masalah.`,
-    `5. REGRESSION TEST: Jalankan tes untuk memverifikasi perbaikan dan menjamin tidak ada regresi.`,
+    `5-STAGE SYSTEMATIC DEBUGGING WORKFLOW (MUST BE FOLLOWED SEQUENTIALLY):`,
+    `1. REPRODUCE: Reproduce failure with the narrowest check or test before touching code.`,
+    `2. ROOT CAUSE INVESTIGATION: Trace data flow, call stack, and error logs. DO NOT guess or jump to editing code!`,
+    `3. HYPOTHESIS: State one clear, falsifiable root cause hypothesis.`,
+    `4. MINIMAL FIX: Apply the smallest, safest change that precisely addresses the root cause.`,
+    `5. REGRESSION TEST: Run tests to verify the fix and ensure no regressions occurred.`,
   ].join("\n");
 }
 
 export function formatReviewPrompt(targetContext?: string): string {
   return [
     `[WORKFLOW MODE: /review]`,
-    targetContext ? `Target Review: "${targetContext}"` : `Target Review: Git diff / perubahan aktif`,
+    targetContext ? `Review Target: "${targetContext}"` : `Review Target: Git diff / active changes`,
     ``,
-    `ATURAN KETAT:`,
-    `1. MODE INI ADALAH READ-ONLY CODE REVIEW. Dilarang mengedit, memperbaiki, atau mengubah file secara otomatis.`,
-    `2. Periksa git diff dan berkas tes yang relevan.`,
-    `3. Evaluasi secara mendalam terhadap:`,
-    `   - Kebenaran logika & kepatuhan kebutuhan`,
-    `   - Cakupan tes (test coverage) & kasus batas (edge cases)`,
-    `   - Keamanan, penanganan error & performa`,
-    `   - Kompleksitas kode & keterbacaan`,
-    `4. Kelompokkan temuan berdasarkan kategori: [CRITICAL], [IMPORTANT], [MINOR], diakhiri dengan kesimpulan kesiapan merge.`,
+    `STRICT RULES:`,
+    `1. THIS MODE IS READ-ONLY CODE REVIEW. Do not edit, patch, or alter files automatically.`,
+    `2. Inspect git diff and relevant test files.`,
+    `3. Thoroughly evaluate logic correctness, test coverage, security, error handling, performance, and code readability.`,
+    `4. Group findings into: [CRITICAL], [IMPORTANT], [MINOR], followed by a merge readiness summary.`,
   ].join("\n");
 }
 
@@ -663,7 +730,7 @@ export function formatReviewPrompt(targetContext?: string): string {
 // ============================================================================
 
 export default function (pi: ExtensionAPI) {
-  // Helper menampilkan popup modal dialog /btw (ephemeral overlay)
+  // Modal overlay for /btw responses
   async function showBtwModal(ctx: ExtensionContext, question: string, answerText: string) {
     if (!ctx.hasUI || !ctx.ui?.custom) return;
 
@@ -709,8 +776,8 @@ export default function (pi: ExtensionAPI) {
           }
 
           box.push(borderCol("├" + "─".repeat(innerW + 2) + "┤"));
-          const hint = theme.fg("dim", "Tekan ESC / ENTER / Q untuk menutup (task utama tidak terpengaruh)");
-          box.push(padLine(hint, getVisibleWidth("Tekan ESC / ENTER / Q untuk menutup (task utama tidak terpengaruh)")));
+          const hint = theme.fg("dim", "Press ESC / ENTER / Q to close (main task unaffected)");
+          box.push(padLine(hint, getVisibleWidth("Press ESC / ENTER / Q to close (main task unaffected)")));
           box.push(borderCol("╰" + "─".repeat(innerW + 2) + "╯"));
 
           const padLeft = Math.max(1, Math.floor((width - (innerW + 4)) / 2));
@@ -721,14 +788,14 @@ export default function (pi: ExtensionAPI) {
     }, { overlay: true });
   }
 
-  // Helper memproses pertanyaan /btw secara detached
+  // Detached worker for /btw questions
   async function dispatchBtwRequest(ctx: ExtensionContext, question: string) {
     const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
     const state = getOrCreateSessionState(sessionId, ctx.cwd);
 
     if (state.btwActive) {
       if (state.btwQueue.length >= 3) {
-        ctx.ui?.notify("Antrean pertanyaan sampingan /btw penuh (maks 3). Jalankan /btw-clear atau tunggu.", "warning");
+        ctx.ui?.notify("Side question queue is full (max 3). Run /btw-clear or wait.", "warning");
         return;
       }
       const contextSummary = extractSanitizedContext(ctx.sessionManager?.getEntries?.() || []);
@@ -738,7 +805,7 @@ export default function (pi: ExtensionAPI) {
         contextSummary,
         queuedAt: new Date().toISOString(),
       });
-      ctx.ui?.notify(`[BTW] Pertanyaan ditambahkan ke antrean (${state.btwQueue.length} menunggu)...`, "info");
+      ctx.ui?.notify(`[BTW] Question added to queue (${state.btwQueue.length} pending)...`, "info");
       return;
     }
 
@@ -747,10 +814,11 @@ export default function (pi: ExtensionAPI) {
     const abortSignal = state.btwAbortController.signal;
 
     const contextSummary = extractSanitizedContext(ctx.sessionManager?.getEntries?.() || []);
+    ctx.ui?.notify(`[BTW] Processing question: "${question}"...`, "info");
 
     // Non-blocking detached worker
     queueMicrotask(async () => {
-      ctx.ui?.setWidget("btw-status", ["⠋ Memproses pertanyaan sampingan /btw di background..."]);
+      ctx.ui?.setWidget("btw-status", ["⠋ Processing /btw side question in background..."]);
 
       try {
         const result = await queryBtwAnswer(question, contextSummary, abortSignal, 15000);
@@ -763,7 +831,7 @@ export default function (pi: ExtensionAPI) {
         if (result.success) {
           await showBtwModal(ctx, question, result.answer);
         } else {
-          ctx.ui?.notify(`[BTW Gagal] ${result.error || "Tidak ada jawaban"}`, "warning");
+          ctx.ui?.notify(`[BTW Failed] ${result.error || "No answer"}`, "warning");
         }
       } catch (err: unknown) {
         ctx.ui?.setWidget("btw-status", undefined);
@@ -773,7 +841,7 @@ export default function (pi: ExtensionAPI) {
         state.btwActive = false;
         state.btwAbortController = null;
 
-        // Proses item berikutnya dari antrean jika ada
+        // Process next item in queue if available
         if (state.btwQueue.length > 0) {
           const next = state.btwQueue.shift();
           if (next) {
@@ -788,7 +856,7 @@ export default function (pi: ExtensionAPI) {
   // Lifecycle Handlers
   // --------------------------------------------------------------------------
 
-  // Blokir semua jalur mutasi di mode /plan dan /review
+  // Block mutation tools in /plan and /review modes
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult> => {
     const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
     const state = getOrCreateSessionState(sessionId, ctx.cwd);
@@ -798,37 +866,40 @@ export default function (pi: ExtensionAPI) {
       if (!READ_ONLY_TOOL_ALLOWLIST.has(toolName)) {
         return {
           block: true,
-          reason: `Tool '${toolName}' diblokir: Mode /${state.activeMode} adalah read-only (hanya tool ${Array.from(READ_ONLY_TOOL_ALLOWLIST).join(", ")} yang diizinkan untuk inspeksi).`,
+          reason: `Tool '${toolName}' blocked: /${state.activeMode} mode is read-only (only ${Array.from(READ_ONLY_TOOL_ALLOWLIST).join(", ")} are permitted for inspection).`,
         };
       }
     }
     return {};
   });
 
-  // Saat turn selesai dan fully settled: capture plan dan reset mode sementara
+  // Capture structured plan and reset mode upon agent settlement
   pi.on("agent_settled", async (_event, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
     const state = getOrCreateSessionState(sessionId, ctx.cwd);
 
-    // Tangkap plan terstruktur jika mode /plan baru selesai
-    if (state.activeMode === "plan") {
+    if (state.activeMode === "plan" && state.currentPlan && !state.currentPlan.planCaptured) {
       try {
-        const entries = ctx.sessionManager?.getEntries?.() || [];
+        const entries = (ctx.sessionManager?.getEntries?.() || []) as Array<{
+          type?: string;
+          message?: { role?: string; content?: unknown };
+        }>;
+
         for (let i = entries.length - 1; i >= 0; i--) {
-          const entry = entries[i] as { type?: string; message?: { role?: string; content?: unknown } };
+          const entry = entries[i];
           if (entry.type === "message" && entry.message?.role === "assistant") {
-            let text = "";
-            if (Array.isArray(entry.message.content)) {
-              text = entry.message.content
-                .filter((c: unknown) => typeof c === "object" && c !== null && (c as { type?: string }).type === "text")
-                .map((c: unknown) => (c as { text: string }).text || "")
-                .join(" ");
-            } else if (typeof entry.message.content === "string") {
-              text = entry.message.content;
+            let assistantText = "";
+            if (typeof entry.message.content === "string") {
+              assistantText = entry.message.content;
+            } else if (Array.isArray(entry.message.content)) {
+              assistantText = entry.message.content
+                .filter((p: unknown) => typeof p === "object" && p !== null && (p as { type?: string }).type === "text")
+                .map((p: unknown) => (p as { text: string }).text || "")
+                .join("\n");
             }
 
-            const parsed = parseStructuredPlanFromAssistantText(text);
-            if (parsed && parsed.steps && parsed.steps.length > 0 && state.currentPlan) {
+            const parsed = parseStructuredPlanFromAssistantText(assistantText);
+            if (parsed && Array.isArray(parsed.steps) && parsed.steps.length > 0) {
               state.currentPlan.steps = parsed.steps;
               state.currentPlan.risks = parsed.risks || [];
               state.currentPlan.acceptanceCriteria = parsed.acceptanceCriteria || [];
@@ -846,13 +917,12 @@ export default function (pi: ExtensionAPI) {
       } catch {}
     }
 
-    // Reset mode agar giliran berikutnya tidak terkunci
     if (state.activeMode === "plan" || state.activeMode === "review" || state.activeMode === "debug") {
       state.activeMode = "idle";
     }
   });
 
-  // Reset state saat session diganti atau ditutup
+  // Reset state upon session switch or shutdown
   pi.on("session_before_switch", async (event, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
     resetSessionWorkflowState(sessionId, ctx.cwd);
@@ -863,26 +933,65 @@ export default function (pi: ExtensionAPI) {
     resetSessionWorkflowState(sessionId, ctx.cwd);
   });
 
+  // Approval helper for /plan approve or /plan-approve
+  function handlePlanApprove(
+    ctx: ExtensionCommandContext,
+    sessionId: string,
+    state: SessionWorkflowState
+  ): void {
+    const { plan, diagnostic } = loadPlanValidated(ctx.cwd, sessionId);
+    if (diagnostic || !plan) {
+      ctx.ui?.notify(
+        diagnostic || "No active plan available to approve. Create a plan via /plan <goal> or migrate via /plan migrate.",
+        "warning"
+      );
+      return;
+    }
+
+    if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
+      ctx.ui?.notify(
+        "Real plan has not been extracted from assistant output yet (still in draft placeholder status). Wait for assistant to finish analysis or ensure structured steps are present before approving.",
+        "warning"
+      );
+      return;
+    }
+
+    plan.status = "approved";
+    plan.updatedAt = new Date().toISOString();
+    state.currentPlan = plan;
+
+    const saveRes = savePlanAtomic(ctx.cwd, plan);
+    if (!saveRes.success) {
+      ctx.ui?.notify(saveRes.error || "Failed to save plan approval.", "error");
+      return;
+    }
+
+    pi.appendEntry("workflow_plan", plan);
+    ctx.ui?.notify(`Plan for '${plan.goal}' has been APPROVED. Run /build to execute.`, "info");
+  }
+
   // --------------------------------------------------------------------------
   // Commands
   // --------------------------------------------------------------------------
 
   // /btw: Out-of-band side question
   pi.registerCommand("btw", {
-    description: "Ajukan pertanyaan sampingan out-of-band tanpa mengganggu task/plan aktif",
+    description: "Ask an out-of-band side question without interrupting active tasks or context",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const question = args.trim();
-      if (!question) {
-        ctx.ui?.notify("Gunakan: /btw <pertanyaan>", "warning");
+      const intent = parseBtwIntent(args);
+      if (intent.kind === "default") {
+        ctx.ui?.notify("Use: /btw <question> to ask a side question.", "info");
         return;
       }
-      await dispatchBtwRequest(ctx, question);
+      if (intent.kind === "direct") {
+        await dispatchBtwRequest(ctx, intent.argument);
+      }
     },
   });
 
-  // /btw-list: Lihat status antrean
+  // /btw-list: View queue status
   pi.registerCommand("btw-list", {
-    description: "Lihat status antrean pertanyaan sampingan /btw",
+    description: "View status of /btw side question queue",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
       const state = getOrCreateSessionState(sessionId, ctx.cwd);
@@ -890,21 +999,21 @@ export default function (pi: ExtensionAPI) {
       if (state.btwQueue.length === 0) {
         ctx.ui?.notify(
           state.btwActive
-            ? "Sedang memproses 1 pertanyaan sampingan /btw aktif (tidak ada antrean tambahan)."
-            : "Antrean /btw kosong.",
+            ? "Currently processing 1 active /btw question (no additional items queued)."
+            : "/btw queue is empty.",
           "info"
         );
         return;
       }
 
       const list = state.btwQueue.map((item, idx) => `${idx + 1}. ${item.question}`).join("\n");
-      ctx.ui?.notify(`Antrean /btw (${state.btwQueue.length}):\n${list}`, "info");
+      ctx.ui?.notify(`/btw queue (${state.btwQueue.length}):\n${list}`, "info");
     },
   });
 
-  // /btw-clear: Batalkan request aktif dan bersihkan antrean
+  // /btw-clear: Cancel active request and clear queue
   pi.registerCommand("btw-clear", {
-    description: "Batalkan request /btw aktif dan bersihkan semua antrean",
+    description: "Cancel active /btw request and clear all queued items",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
       const state = getOrCreateSessionState(sessionId, ctx.cwd);
@@ -918,183 +1027,239 @@ export default function (pi: ExtensionAPI) {
       state.btwQueue = [];
       ctx.ui?.setWidget("btw-status", undefined);
 
-      ctx.ui?.notify(`Membersihkan ${count} aktivitas / antrean /btw.`, "info");
+      ctx.ui?.notify(`Cleared ${count} active / queued /btw items.`, "info");
     },
   });
 
-  // /plan <tujuan>: Read-only planning
+  // /plan <goal>: Read-only planning
   pi.registerCommand("plan", {
-    description: "Rancang rencana implementasi terstruktur secara read-only sebelum coding",
+    description: "Design structured implementation plan in read-only mode before coding",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const trimmed = args.trim();
+      const intent = parsePlanIntent(args);
       const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
       const state = getOrCreateSessionState(sessionId, ctx.cwd);
 
-      // Handle sub-command "/plan approve"
-      if (trimmed.toLowerCase() === "approve") {
+      // C. State-explicit: /plan approve
+      if (intent.kind === "state-explicit" && intent.operation === "approve") {
+        handlePlanApprove(ctx, sessionId, state);
+        return;
+      }
+
+      // C. State-explicit: /plan migrate
+      if (intent.kind === "state-explicit" && intent.operation === "migrate") {
+        const res = migrateLegacyPlan(ctx.cwd, sessionId);
+        ctx.ui?.notify(res.message, res.success ? "info" : "error");
+        return;
+      }
+
+      // A. Direct command: /plan <goal>
+      if (intent.kind === "direct") {
+        state.activeMode = "plan";
+
+        const now = new Date().toISOString();
+        const newPlan: WorkflowPlanV1 = {
+          schemaVersion: 1,
+          sessionId,
+          cwd: path.resolve(ctx.cwd),
+          goal: intent.argument,
+          status: "draft",
+          planCaptured: false,
+          contentSource: "draft_placeholder",
+          steps: [],
+          risks: [],
+          acceptanceCriteria: [],
+          verificationCommands: ["npm test"],
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        state.currentPlan = newPlan;
+        savePlanAtomic(ctx.cwd, newPlan);
+        pi.appendEntry("workflow_plan", newPlan);
+
+        pi.sendUserMessage(formatPlanPrompt(intent.argument));
+        return;
+      }
+
+      // B. Default command: /plan (no arguments)
+      const { plan } = loadPlanValidated(ctx.cwd, sessionId);
+      if (plan) {
+        ctx.ui?.notify(
+          `Active plan: '${plan.goal}' [${plan.status.toUpperCase()}]. Use '/plan approve' to approve, or '/plan <goal>' to create a new plan.`,
+          "info"
+        );
+        return;
+      }
+
+      ctx.ui?.notify("Use: /plan <goal> (or '/plan approve' to approve active plan)", "warning");
+    },
+  });
+
+  // /plan-approve: Explicit command to approve active plan
+  pi.registerCommand("plan-approve", {
+    description: "Approve active plan so it can be executed by /build",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
+      const state = getOrCreateSessionState(sessionId, ctx.cwd);
+      handlePlanApprove(ctx, sessionId, state);
+    },
+  });
+
+  // /plan-migrate: Explicit command to migrate legacy plan file
+  pi.registerCommand("plan-migrate", {
+    description: "Migrate legacy plan file to JSON schema version 1",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
+      const res = migrateLegacyPlan(ctx.cwd, sessionId);
+      ctx.ui?.notify(res.message, res.success ? "info" : "error");
+    },
+  });
+
+  // /build: Run approved plan or direct task
+  pi.registerCommand("build", {
+    description: "Execute direct task (/build <task>) or approved plan (/build)",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const intent = parseBuildIntent(args);
+      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
+      const state = getOrCreateSessionState(sessionId, ctx.cwd);
+
+      // A. Direct command: /build <task>
+      if (intent.kind === "direct") {
+        state.activeMode = "build";
+        pi.sendUserMessage(formatDirectBuildPrompt(intent.argument));
+        return;
+      }
+
+      // C. State-explicit command: /build --from-plan
+      if (intent.kind === "state-explicit" && intent.operation === "from-plan") {
         const { plan, diagnostic } = loadPlanValidated(ctx.cwd, sessionId);
         if (diagnostic || !plan) {
-          ctx.ui?.notify(diagnostic || "Belum ada rencana aktif untuk disetujui. Buat dengan /plan <tujuan>.", "warning");
+          ctx.ui?.notify(
+            diagnostic || "No active plan available. Create a plan via /plan <goal> or migrate via /plan migrate.",
+            "error"
+          );
           return;
         }
 
         if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
           ctx.ui?.notify(
-            "Rencana nyata belum berhasil diekstrak dari analisis asisten (masih berstatus draft placeholder). Tunggu asisten selesai menganalisis atau pastikan respon memuat langkah terstruktur sebelum menyetujui.",
+            `Plan '${plan.goal}' does not have concrete steps extracted from the assistant yet. Recreate via /plan or wait for analysis to complete.`,
+            "error"
+          );
+          return;
+        }
+
+        if (plan.status === "draft") {
+          ctx.ui?.notify(
+            `Plan '${plan.goal}' is still in DRAFT status and has not been approved. Run '/plan approve' to approve it before /build.`,
             "warning"
           );
           return;
         }
 
-        plan.status = "approved";
+        state.activeMode = "build";
+        plan.status = "running";
         plan.updatedAt = new Date().toISOString();
-        state.currentPlan = plan;
-
-        const saveRes = savePlanAtomic(ctx.cwd, plan);
-        if (!saveRes.success) {
-          ctx.ui?.notify(saveRes.error || "Gagal menyimpan persetujuan plan.", "error");
-          return;
-        }
-
+        savePlanAtomic(ctx.cwd, plan);
         pi.appendEntry("workflow_plan", plan);
-        ctx.ui?.notify(`Rencana untuk '${plan.goal}' telah DISETUJUI. Jalankan /build untuk mengeksekusi.`, "info");
+
+        pi.sendUserMessage(formatBuildPrompt(plan));
         return;
       }
 
-      if (!trimmed) {
-        ctx.ui?.notify("Gunakan: /plan <tujuan> (atau '/plan approve' untuk menyetujui rencana)", "warning");
+      // B. Default command: /build (without argument)
+      const { plan } = loadPlanValidated(ctx.cwd, sessionId);
+      if (plan && plan.status === "approved" && plan.planCaptured && plan.steps.length > 0) {
+        state.activeMode = "build";
+        plan.status = "running";
+        plan.updatedAt = new Date().toISOString();
+        savePlanAtomic(ctx.cwd, plan);
+        pi.appendEntry("workflow_plan", plan);
+
+        pi.sendUserMessage(formatBuildPrompt(plan));
         return;
       }
 
-      state.activeMode = "plan";
-
-      const now = new Date().toISOString();
-      const newPlan: WorkflowPlanV1 = {
-        schemaVersion: 1,
-        sessionId,
-        cwd: path.resolve(ctx.cwd),
-        goal: trimmed,
-        status: "draft",
-        planCaptured: false,
-        contentSource: "draft_placeholder",
-        steps: [],
-        risks: [],
-        acceptanceCriteria: [],
-        verificationCommands: ["npm test"],
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      state.currentPlan = newPlan;
-      savePlanAtomic(ctx.cwd, newPlan);
-      pi.appendEntry("workflow_plan", newPlan);
-
-      pi.sendUserMessage(formatPlanPrompt(trimmed));
-    },
-  });
-
-  // /plan-approve: Command eksplisit menyetujui plan aktif
-  pi.registerCommand("plan-approve", {
-    description: "Setujui rencana aktif agar dapat dijalankan oleh /build",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
-      const state = getOrCreateSessionState(sessionId, ctx.cwd);
-
-      const { plan, diagnostic } = loadPlanValidated(ctx.cwd, sessionId);
-      if (diagnostic || !plan) {
-        ctx.ui?.notify(diagnostic || "Belum ada rencana aktif. Silakan buat rencana via /plan <tujuan>.", "warning");
-        return;
-      }
-
-      if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
+      if (plan && plan.status === "draft") {
         ctx.ui?.notify(
-          "Rencana nyata belum berhasil diekstrak dari analisis asisten (masih berstatus draft placeholder). Tunggu asisten selesai menganalisis atau pastikan respon memuat langkah terstruktur sebelum menyetujui.",
+          `Active plan '${plan.goal}' is still in DRAFT status. Run '/plan approve' to approve, or '/build <task>' to build directly.`,
           "warning"
         );
         return;
       }
 
-      plan.status = "approved";
-      plan.updatedAt = new Date().toISOString();
-      state.currentPlan = plan;
-
-      const saveRes = savePlanAtomic(ctx.cwd, plan);
-      if (!saveRes.success) {
-        ctx.ui?.notify(saveRes.error || "Gagal menyimpan persetujuan rencana.", "error");
-        return;
-      }
-
-      pi.appendEntry("workflow_plan", plan);
-      ctx.ui?.notify(`Rencana '${plan.goal}' berhasil DISETUJUI. Jalankan /build untuk memulai.`, "info");
+      notifyStateFallback(
+        ctx,
+        "build",
+        "/build Add CSV export",
+        "/build --from-plan"
+      );
     },
   });
 
-  // /build: Menjalankan rencana yang disetujui
-  pi.registerCommand("build", {
-    description: "Eksekusi bertahap dari rencana /plan yang telah disetujui",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
-      const state = getOrCreateSessionState(sessionId, ctx.cwd);
-
-      const { plan, diagnostic } = loadPlanValidated(ctx.cwd, sessionId);
-      if (diagnostic || !plan) {
-        ctx.ui?.notify(diagnostic || "Belum ada rencana aktif. Silakan buat rencana terlebih dahulu dengan: /plan <tujuan>", "error");
-        return;
-      }
-
-      if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
-        ctx.ui?.notify(
-          `Rencana '${plan.goal}' belum memiliki langkah nyata yang diekstrak dari asisten. Silakan buat rencana baru atau tunggu analisis selesai via /plan.`,
-          "error"
-        );
-        return;
-      }
-
-      if (plan.status === "draft") {
-        ctx.ui?.notify(
-          `Rencana '${plan.goal}' masih berstatus DRAFT dan belum disetujui. Jalankan '/plan approve' untuk menyetujuinya sebelum /build.`,
-          "warning"
-        );
-        return;
-      }
-
-      state.activeMode = "build";
-      plan.status = "running";
-      plan.updatedAt = new Date().toISOString();
-      savePlanAtomic(ctx.cwd, plan);
-      pi.appendEntry("workflow_plan", plan);
-
-      pi.sendUserMessage(formatBuildPrompt(plan));
-    },
-  });
-
-  // /debug <masalah>: Alur investigasi terstruktur
+  // /debug <issue>: Structured investigation workflow
   pi.registerCommand("debug", {
-    description: "Mulai workflow debugging 5 tahap (Reproduce -> Root-Cause -> Hypothesis -> Fix -> Test)",
+    description: "Start 5-stage systematic debugging workflow (Reproduce -> Root-Cause -> Hypothesis -> Fix -> Test)",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const issue = args.trim();
-      if (!issue) {
-        ctx.ui?.notify("Gunakan: /debug <deskripsi masalah atau pesan error>", "warning");
+      const intent = parseDebugIntent(args);
+      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
+      const state = getOrCreateSessionState(sessionId, ctx.cwd);
+
+      // A. Direct command: /debug <issue>
+      if (intent.kind === "direct") {
+        state.activeMode = "debug";
+        pi.sendUserMessage(formatDebugPrompt(intent.argument));
         return;
       }
 
-      const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
-      const state = getOrCreateSessionState(sessionId, ctx.cwd);
-      state.activeMode = "debug";
-
-      pi.sendUserMessage(formatDebugPrompt(issue));
+      // B. Default command: /debug
+      ctx.ui?.notify("Use: /debug <issue description or error message>", "warning");
     },
   });
 
-  // /review: Code review read-only
+  // /review: Read-only code review
   pi.registerCommand("review", {
-    description: "Lakukan code review read-only pada git diff / perubahan aktif",
+    description: "Perform read-only code review on git diff or specific target",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const intent = parseReviewIntent(args);
       const sessionId = ctx.sessionManager?.getSessionId?.() || "default";
       const state = getOrCreateSessionState(sessionId, ctx.cwd);
       state.activeMode = "review";
 
-      pi.sendUserMessage(formatReviewPrompt(args.trim()));
+      // A. Direct command: /review <target>
+      if (intent.kind === "direct") {
+        pi.sendUserMessage(formatReviewPrompt(intent.argument));
+        return;
+      }
+
+      // B. Default command: /review (git diff)
+      pi.sendUserMessage(formatReviewPrompt(""));
     },
   });
+}
+
+function getVisibleWidth(str: string): number {
+  return str.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+export function wrapText(text: string, maxWidth: number): string[] {
+  const lines: string[] = [];
+  for (const rawLine of text.split("\n")) {
+    if (rawLine.length <= maxWidth) {
+      lines.push(rawLine);
+      continue;
+    }
+    const words = rawLine.split(" ");
+    let cur = "";
+    for (const w of words) {
+      if ((cur + (cur ? " " : "") + w).length <= maxWidth) {
+        cur += (cur ? " " : "") + w;
+      } else {
+        if (cur) lines.push(cur);
+        cur = w;
+      }
+    }
+    if (cur) lines.push(cur);
+  }
+  return lines;
 }

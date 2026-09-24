@@ -5,6 +5,12 @@ import type {
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import {
+  safePostJson,
+  validateEndpointUrl,
+  resolveSecureApiKey,
+  isExternalOptInEnabled,
+} from "./security-guard.js";
 
 // Membersihkan string judul: hilangkan kutip, awalan obrolan, karakter kontrol, dan batasi 6 kata
 export function cleanTitle(raw: string): string {
@@ -48,43 +54,41 @@ export interface TitleEndpointConfig {
 
 export function resolveTitleEndpoint(): TitleEndpointConfig | null {
   const envUrl = process.env.PI_TITLE_URL || process.env.NINE_ROUTER_BASE_URL;
-  const envKey = process.env.PI_TITLE_API_KEY || process.env.NINE_ROUTER_API_KEY;
   const envModel = process.env.PI_TITLE_MODEL;
 
-  if (envUrl) {
-    try {
-      const parsed = new URL(envUrl);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        return {
-          baseUrl: parsed.origin,
-          apiKey: envKey,
-          model: envModel || "ag/gemini-3.8-flash-low",
-        };
-      }
-    } catch {}
-  }
-
-  const configPath = path.join(os.homedir(), ".pi", "agent", "9router-config.json");
-  if (fs.existsSync(configPath)) {
-    try {
-      const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      if (cfg && typeof cfg.baseUrl === "string") {
-        const parsed = new URL(cfg.baseUrl);
-        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-          return {
-            baseUrl: parsed.origin,
-            apiKey: typeof cfg.apiKey === "string" ? cfg.apiKey : undefined,
-            model: envModel || "ag/gemini-3.8-flash-low",
-          };
+  let rawUrl = envUrl;
+  if (!rawUrl) {
+    const configPath = path.join(os.homedir(), ".pi", "agent", "9router-config.json");
+    if (fs.existsSync(configPath)) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        if (typeof cfg?.baseUrl === "string") {
+          rawUrl = cfg.baseUrl;
         }
-      }
-    } catch {}
+      } catch {}
+    }
   }
 
-  return null;
+  if (!rawUrl) {
+    rawUrl = "http://127.0.0.1:20128";
+  }
+
+  const allowExternal = isExternalOptInEnabled();
+  const validation = validateEndpointUrl(rawUrl, allowExternal);
+  if (!validation.valid || !validation.url) {
+    return null;
+  }
+
+  const secret = resolveSecureApiKey();
+
+  return {
+    baseUrl: validation.url.origin,
+    apiKey: secret.apiKey,
+    model: envModel || "ag/gemini-3.8-flash-low",
+  };
 }
 
-// Request LLM title dengan timeout menyeluruh di block finally
+// Request LLM title dengan timeout menyeluruh dan security guard
 export async function requestLlmTitle(
   promptContext: string,
   timeoutMs = 3000
@@ -92,66 +96,49 @@ export async function requestLlmTitle(
   const endpoint = resolveTitleEndpoint();
   if (!endpoint) return null;
 
-  const controller = new AbortController();
-  let timer: NodeJS.Timeout | null = null;
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error("Timeout permintaan title"));
-    }, timeoutMs);
-  });
-
-  const instruction = `Task: Summarize the primary objective of this user request into a short imperative action title of 3 to 5 words (similar to: "Perbaiki konflik ekstensi pi", "Putuskan Claude Code dari 9router", "Configure postgresql backup script", "Use terra model").
+  const instruction = `Task: Summarize the primary objective of this user request into a short imperative action title of 3 to 5 words (similar to: "Fix pi extension conflict", "Disconnect Claude Code from 9router", "Configure postgresql backup script", "Use terra model").
 User prompt: "${promptContext}"
 Rules:
 1. Match the exact language of the request (if Indonesian use Indonesian, if English use English).
 2. Do not translate.
 3. Output ONLY the title text. No punctuation, no quotes, no conversational filler.`;
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+  const targetUrl = `${endpoint.baseUrl}/v1/chat/completions`;
+  const payload = {
+    model: endpoint.model,
+    stream: false,
+    max_tokens: 25,
+    messages: [{ role: "user", content: instruction }],
   };
-  if (endpoint.apiKey) {
-    headers.Authorization = `Bearer ${endpoint.apiKey}`;
-  }
 
   try {
-    const fetchPromise = (async () => {
-      const res = await fetch(`${endpoint.baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: endpoint.model,
-          stream: false,
-          max_tokens: 25,
-          messages: [{ role: "user", content: instruction }],
-        }),
-        signal: controller.signal,
-      });
-
-      if (!res.ok) return null;
-      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const content = data.choices?.[0]?.message?.content;
-      if (typeof content === "string") {
-        const firstLine = content.split(/[\r\n]+/)[0]?.trim();
-        return cleanTitle(firstLine);
+    const res = await safePostJson<{ choices?: Array<{ message?: { content?: string } }> }>(
+      targetUrl,
+      payload,
+      endpoint.apiKey,
+      {
+        timeoutMs,
+        allowExternal: isExternalOptInEnabled(),
       }
-      return null;
-    })();
+    );
 
-    return await Promise.race([fetchPromise, timeoutPromise]);
+    if (!res.success || !res.data) return null;
+
+    const content = res.data.choices?.[0]?.message?.content;
+    if (typeof content === "string") {
+      const firstLine = content.split(/[\r\n]+/)[0]?.trim();
+      return cleanTitle(firstLine);
+    }
+    return null;
   } catch {
     return null;
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
 export default function (pi: ExtensionAPI) {
   const activeRequests = new Set<string>();
 
-  // Gunakan lifecycle stabil agent_settled (bukan agent_end) agar tidak menamai saat proses retry / auto-compact berjalan
+  // Use stable agent_settled lifecycle (instead of agent_end) to avoid naming during retries or auto-compaction
   pi.on("agent_settled", async (_event, ctx: ExtensionContext) => {
     // 1. Cek apakah sesi sudah memiliki nama (baik manual atau generate sebelumnya)
     const existingName = ctx.sessionManager?.getSessionName?.() || pi.getSessionName();
@@ -220,7 +207,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        // Gunakan konteks substantif terbaru (bukan hanya pesan pembuka pertama)
+        // Use the latest substantive context (not just the opening greeting)
         const reversed = [...userTexts].reverse();
         const latestSubstantive = reversed.find((t) => t.length > 8) || userTexts[userTexts.length - 1] || "";
         const contextSample = latestSubstantive.slice(0, 300);
@@ -235,7 +222,7 @@ export default function (pi: ExtensionAPI) {
           finalTitle = localFallback;
         }
 
-        // Cek kembali tepat sebelum commit nama sesi agar tidak menimpa judul manual
+        // Check again right before committing the session name to prevent overwriting manual titles
         const checkBeforeCommit = ctx.sessionManager?.getSessionName?.() || pi.getSessionName();
         if (checkBeforeCommit && checkBeforeCommit.trim().length > 0) {
           return;
@@ -246,7 +233,7 @@ export default function (pi: ExtensionAPI) {
           pi.appendEntry("auto_session_title", { generated: true, title: finalTitle });
         }
       } catch {
-        // Non-kritis: kegagalan penamaan sesi tidak boleh mengganggu chat
+        // Non-critical: failure in title generation should not disrupt user interaction
       } finally {
         activeRequests.delete(sessionId);
       }

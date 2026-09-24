@@ -60,11 +60,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("themes", {
-    description: "Pilih tema dan otomatis ubah warna TUI serta background terminal",
+    description: "Switch theme and synchronize terminal background color",
     handler: async (args, ctx) => {
       try {
         if (!ctx.hasUI) {
-          ctx.ui.notify("Command /themes butuh UI interaktif", "error");
+          ctx.ui.notify("Command /themes requires interactive UI", "error");
           return;
         }
 
@@ -82,18 +82,18 @@ export default function (pi: ExtensionAPI) {
 
         const themeList = Array.from(themeSet);
 
-        // Ubah tema, simpan ke setting, dan set OSC 11 background
+        // Switch theme, persist to settings, and set OSC 11 background
         const switchTheme = (target: string) => {
           const res = ctx.ui.setTheme(target);
           if (res?.success === false) {
-            ctx.ui.notify(`Gagal: ${res.error}`, "error");
+            ctx.ui.notify(`Failed: ${res.error}`, "error");
             return;
           }
 
-          // Sinkronkan warna background terminal
+          // Synchronize terminal background color
           applyThemeBg(target);
 
-          // Simpan permanen ke ~/.pi/agent/settings.json
+          // Persist to ~/.pi/agent/settings.json
           try {
             const settingsFile = path.join(os.homedir(), ".pi", "agent", "settings.json");
             const conf = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, "utf-8")) : {};
@@ -101,14 +101,14 @@ export default function (pi: ExtensionAPI) {
             fs.writeFileSync(settingsFile, JSON.stringify(conf, null, 2), "utf-8");
           } catch {}
 
-          ctx.ui.notify(`Tema & background terminal diubah ke: ${target}`, "info");
+          ctx.ui.notify(`Theme and terminal background set to: ${target}`, "info");
         };
 
         const targetTheme = args?.trim();
         if (targetTheme) {
           if (!themeList.includes(targetTheme)) {
             ctx.ui.notify(
-              `Tema '${targetTheme}' tidak ditemukan. Pilihan: ${themeList.join(", ")}`,
+              `Theme '${targetTheme}' not found. Available: ${themeList.join(", ")}`,
               "error"
             );
             return;
@@ -117,8 +117,8 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        // Dialog interaktif pemilihan tema
-        const selected = await ctx.ui.select("Pilih Tema Pi:", themeList);
+        // Interactive theme selection dialog
+        const selected = await ctx.ui.select("Select Pi Theme:", themeList);
         if (!selected) return;
 
         switchTheme(selected);

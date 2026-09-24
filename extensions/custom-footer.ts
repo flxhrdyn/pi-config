@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -140,7 +140,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     ensureCustomUI(ctx);
-    // Jalankan juga di tick berikutnya untuk menimpa resetExtensionUI bawaan Pi saat /reload
+    // Also execute on next tick to override Pi built-in resetExtensionUI during /reload
     setTimeout(() => ensureCustomUI(ctx), 50);
   });
 
@@ -282,6 +282,25 @@ export default function (pi: ExtensionAPI) {
     requestTuiRender?.();
   });
 
+  pi.on("session_before_compact", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    ensureCustomUI(ctx);
+    isBusy = true;
+    requestTuiRender?.();
+  });
+
+  pi.on("session_compact", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    isBusy = false;
+    requestTuiRender?.();
+  });
+
+  pi.on("session_compact_failed", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    isBusy = false;
+    requestTuiRender?.();
+  });
+
   function updateWorkingWidget(ctx: any) {
     const elapsedSec = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
     const activeFrame = SPINNER_FRAMES[frameIdx];
@@ -297,6 +316,12 @@ export default function (pi: ExtensionAPI) {
 
   function initCleanVimUI(ctx: any) {
     ctx.ui.setWorkingVisible(false);
+
+    if (typeof ctx.ui?.setEditorComponent === "function") {
+      ctx.ui.setEditorComponent((tui: any, editorTheme: any, keybindings: any) => {
+        return new CustomEditor(tui, editorTheme, keybindings, { embedWorkingStatus: false });
+      });
+    }
 
     ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
       requestTuiRender = () => tui.requestRender();
@@ -653,7 +678,7 @@ export default function (pi: ExtensionAPI) {
 
       const sessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
       if (!fs.existsSync(sessionsDir)) {
-        ctx.ui.notify("Folder sesi tidak ditemukan", "warning");
+        ctx.ui.notify("Session folder not found", "warning");
         return;
       }
 
@@ -722,12 +747,12 @@ export default function (pi: ExtensionAPI) {
         traverseDirs(sessionsDir);
         sessionList.sort((a, b) => b.time.getTime() - a.time.getTime());
       } catch (err) {
-        ctx.ui.notify(`Gagal membaca daftar sesi: ${err}`, "error");
+        ctx.ui.notify(`Failed to read session list: ${err}`, "error");
         return;
       }
 
       if (sessionList.length === 0) {
-        ctx.ui.notify("Belum ada riwayat sesi tersimpan", "info");
+        ctx.ui.notify("No saved session history found", "info");
         return;
       }
 
@@ -759,7 +784,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`Beralih ke sesi: ${chosen.preview}`, "info");
           await ctx.switchSession(chosen.path);
         } else {
-          ctx.ui.notify("switchSession tidak didukung di context saat ini", "warning");
+          ctx.ui.notify("switchSession is not supported in the current context", "warning");
         }
       }
     },

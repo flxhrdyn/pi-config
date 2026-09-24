@@ -6,17 +6,25 @@ import * as os from "node:os";
 import workflowExtension, {
   formatPlanPrompt,
   formatBuildPrompt,
+  formatDirectBuildPrompt,
   formatDebugPrompt,
   formatReviewPrompt,
   wrapText,
   validatePlanSchema,
   savePlanAtomic,
   loadPlanValidated,
+  migrateLegacyPlan,
   parseStructuredPlanFromAssistantText,
   extractSanitizedContext,
   queryBtwAnswer,
   getOrCreateSessionState,
   clearAllSessionWorkflowStates,
+  parseBuildIntent,
+  parsePlanIntent,
+  parseDebugIntent,
+  parseReviewIntent,
+  parseBtwIntent,
+  notifyStateFallback,
   type WorkflowPlanV1,
 } from "../extensions/workflow-commands.js";
 
@@ -241,6 +249,35 @@ describe("workflow-commands hardened extension tests", () => {
       expect(loaded.diagnostic).toContain("invalid JSON");
     });
 
+    it("detects unversioned legacy plan and guides user to /plan migrate", () => {
+      const planDir = path.join(testCwd, ".pi");
+      fs.mkdirSync(planDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(planDir, "active-plan.json"),
+        JSON.stringify({
+          goal: "Legacy plan goal",
+          steps: ["Step 1", "Step 2"],
+          verificationCommand: "npm test",
+        }),
+        "utf8"
+      );
+
+      const loaded = loadPlanValidated(testCwd, "current-sess");
+      expect(loaded.plan).toBeNull();
+      expect(loaded.diagnostic).toContain("/plan migrate");
+
+      // Now explicit migration succeeds
+      const mig = migrateLegacyPlan(testCwd, "current-sess");
+      expect(mig.success).toBe(true);
+      expect(mig.plan?.schemaVersion).toBe(1);
+      expect(mig.plan?.goal).toBe("Legacy plan goal");
+
+      // After migration, loadPlanValidated succeeds
+      const reloaded = loadPlanValidated(testCwd, "current-sess");
+      expect(reloaded.plan).not.toBeNull();
+      expect(reloaded.plan?.schemaVersion).toBe(1);
+    });
+
     it("rejects plan from a different session or cwd", () => {
       const plan: WorkflowPlanV1 = {
         schemaVersion: 1,
@@ -262,7 +299,7 @@ describe("workflow-commands hardened extension tests", () => {
       // Check with different session ID
       const loaded = loadPlanValidated(testCwd, "my-current-session");
       expect(loaded.plan).toBeNull();
-      expect(loaded.diagnostic).toContain("dibuat pada sesi lain");
+      expect(loaded.diagnostic).toContain("created in another session");
     });
 
     it("/plan approve rejects if real plan has not been captured from agent output", async () => {
@@ -278,14 +315,14 @@ describe("workflow-commands hardened extension tests", () => {
       // Attempting to approve before agent outputs a real plan must be rejected
       await commands["plan"]("approve", ctx);
       expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("Rencana nyata belum berhasil diekstrak"),
+        expect.stringContaining("Real plan has not been extracted"),
         "warning"
       );
 
-      // /build must also reject
-      await commands["build"]("", ctx);
+      // /build --from-plan must also reject
+      await commands["build"]("--from-plan", ctx);
       expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("belum memiliki langkah nyata"),
+        expect.stringContaining("does not have concrete steps"),
         "error"
       );
     });
@@ -329,14 +366,14 @@ describe("workflow-commands hardened extension tests", () => {
       await commands["build"]("", ctx);
       expect(sentMessages.length).toBe(1); // Only the /plan message, /build did NOT trigger
       expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("DRAFT dan belum disetujui"),
+        expect.stringContaining("DRAFT"),
         "warning"
       );
 
       // Approve plan via /plan approve
       await commands["plan"]("approve", ctx);
       expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("DISETUJUI"),
+        expect.stringContaining("APPROVED"),
         "info"
       );
 
@@ -440,7 +477,7 @@ describe("workflow-commands hardened extension tests", () => {
       await commands["btw"]("q4", ctx);
       expect(state.btwQueue.length).toBe(3);
       expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("penuh"),
+        expect.stringContaining("queue is full"),
         "warning"
       );
     });
@@ -468,7 +505,7 @@ describe("workflow-commands hardened extension tests", () => {
       expect(state.btwQueue.length).toBe(0);
       expect(mockUi.setWidget).toHaveBeenCalledWith("btw-status", undefined);
       expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("Membersihkan"),
+        expect.stringContaining("Cleared"),
         "info"
       );
     });
@@ -508,6 +545,247 @@ describe("workflow-commands hardened extension tests", () => {
       expect(res.success).toBe(false);
       expect(res.error).toBeDefined();
       expect(res.answer).toBe("");
+    });
+  });
+
+  describe("UX Principle Required Test Matrix: Direct Commands are never blocked by state", () => {
+    const directCommands = [
+      ["plan", "Tambahkan login Google"],
+      ["build", "Tambahkan export CSV"],
+      ["debug", "Request timeout"],
+      ["review", "src/auth.ts"],
+      ["btw", "Apa beda useMemo dan useCallback?"],
+    ];
+
+    describe.each(directCommands)("Direct command: /%s with argument '%s'", (cmdName, cmdArg) => {
+      it("runs successfully and preserves legacy plan on disk", async () => {
+        workflowExtension(mockPi);
+        const planDir = path.join(testCwd, ".pi");
+        fs.mkdirSync(planDir, { recursive: true });
+        const legacyContent = JSON.stringify({
+          goal: "Old legacy unversioned plan",
+          steps: ["Step 1", "Step 2"],
+        });
+        fs.writeFileSync(path.join(planDir, "active-plan.json"), legacyContent, "utf8");
+
+        const ctx: any = {
+          cwd: testCwd,
+          ui: mockUi,
+          sessionManager: { getSessionId: () => "sess-matrix-1" },
+        };
+
+        await commands[cmdName](cmdArg, ctx);
+
+        if (cmdName !== "btw") {
+          expect(sentMessages.length).toBeGreaterThan(0);
+          expect(sentMessages[sentMessages.length - 1].content).toContain(cmdArg);
+        } else {
+          expect(mockUi.notify).toHaveBeenCalled();
+        }
+
+        // Old legacy state on disk MUST NOT be changed or overwritten by direct commands
+        if (cmdName !== "plan") {
+          const currentDiskContent = fs.readFileSync(path.join(planDir, "active-plan.json"), "utf8");
+          expect(currentDiskContent).toBe(legacyContent);
+        }
+      });
+
+      it("runs successfully and preserves corrupt plan on disk", async () => {
+        workflowExtension(mockPi);
+        const planDir = path.join(testCwd, ".pi");
+        fs.mkdirSync(planDir, { recursive: true });
+        const corruptContent = "{ corrupted active-plan JSON !!!";
+        fs.writeFileSync(path.join(planDir, "active-plan.json"), corruptContent, "utf8");
+
+        const ctx: any = {
+          cwd: testCwd,
+          ui: mockUi,
+          sessionManager: { getSessionId: () => "sess-matrix-2" },
+        };
+
+        await commands[cmdName](cmdArg, ctx);
+
+        if (cmdName !== "btw") {
+          expect(sentMessages.length).toBeGreaterThan(0);
+          expect(sentMessages[sentMessages.length - 1].content).toContain(cmdArg);
+        } else {
+          expect(mockUi.notify).toHaveBeenCalled();
+        }
+
+        // Corrupt plan on disk MUST NOT be changed by direct commands
+        if (cmdName !== "plan") {
+          const currentDiskContent = fs.readFileSync(path.join(planDir, "active-plan.json"), "utf8");
+          expect(currentDiskContent).toBe(corruptContent);
+        }
+      });
+
+      it("runs successfully when active plan belongs to another session", async () => {
+        workflowExtension(mockPi);
+        const planDir = path.join(testCwd, ".pi");
+        fs.mkdirSync(planDir, { recursive: true });
+        const otherSessionPlan: WorkflowPlanV1 = {
+          schemaVersion: 1,
+          sessionId: "completely-different-session-xyz",
+          cwd: path.resolve(testCwd),
+          goal: "Plan from other session",
+          status: "approved",
+          planCaptured: true,
+          contentSource: "agent",
+          steps: ["Step A"],
+          risks: [],
+          acceptanceCriteria: [],
+          verificationCommands: ["npm test"],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        fs.writeFileSync(path.join(planDir, "active-plan.json"), JSON.stringify(otherSessionPlan, null, 2), "utf8");
+
+        const ctx: any = {
+          cwd: testCwd,
+          ui: mockUi,
+          sessionManager: { getSessionId: () => "sess-matrix-3" },
+        };
+
+        await commands[cmdName](cmdArg, ctx);
+
+        if (cmdName !== "btw") {
+          expect(sentMessages.length).toBeGreaterThan(0);
+          expect(sentMessages[sentMessages.length - 1].content).toContain(cmdArg);
+        } else {
+          expect(mockUi.notify).toHaveBeenCalled();
+        }
+
+        if (cmdName !== "plan") {
+          const loaded = JSON.parse(fs.readFileSync(path.join(planDir, "active-plan.json"), "utf8"));
+          expect(loaded.sessionId).toBe("completely-different-session-xyz");
+        }
+      });
+    });
+  });
+
+  describe("UX Principle: State-explicit commands strictly validate and report recovery", () => {
+    it("/build --from-plan rejects missing or corrupt plan and mentions recovery command", async () => {
+      workflowExtension(mockPi);
+      const planDir = path.join(testCwd, ".pi");
+      fs.mkdirSync(planDir, { recursive: true });
+      fs.writeFileSync(path.join(planDir, "active-plan.json"), "{ invalid json", "utf8");
+
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-explicit-1" },
+      };
+
+      await commands["build"]("--from-plan", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("invalid JSON"),
+        "error"
+      );
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("/plan"),
+        "error"
+      );
+    });
+
+    it("/build --from-plan rejects plan from another session without silently falling back", async () => {
+      workflowExtension(mockPi);
+      const plan: WorkflowPlanV1 = {
+        schemaVersion: 1,
+        sessionId: "sess-prior",
+        cwd: path.resolve(testCwd),
+        goal: "Feature A",
+        status: "approved",
+        planCaptured: true,
+        contentSource: "agent",
+        steps: ["Step 1"],
+        risks: [],
+        acceptanceCriteria: [],
+        verificationCommands: ["npm test"],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      savePlanAtomic(testCwd, plan);
+
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-current" },
+      };
+
+      await commands["build"]("--from-plan", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("created in another session"),
+        "error"
+      );
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("/plan <goal>"),
+        "error"
+      );
+    });
+
+    it("/plan approve rejects corrupt plan and mentions recovery", async () => {
+      workflowExtension(mockPi);
+      const planDir = path.join(testCwd, ".pi");
+      fs.mkdirSync(planDir, { recursive: true });
+      fs.writeFileSync(path.join(planDir, "active-plan.json"), "{ bad json", "utf8");
+
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-explicit-2" },
+      };
+
+      await commands["plan"]("approve", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("invalid JSON"),
+        "warning"
+      );
+    });
+
+    it("/plan-migrate migrates legacy plan and rejects unparseable plan", async () => {
+      workflowExtension(mockPi);
+      const planDir = path.join(testCwd, ".pi");
+      fs.mkdirSync(planDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(planDir, "active-plan.json"),
+        JSON.stringify({ goal: "Legacy goal", steps: ["S1"] }),
+        "utf8"
+      );
+
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-explicit-3" },
+      };
+
+      await commands["plan-migrate"]("", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("successfully migrated"),
+        "info"
+      );
+
+      const loaded = loadPlanValidated(testCwd, "sess-explicit-3");
+      expect(loaded.plan?.schemaVersion).toBe(1);
+      expect(loaded.plan?.goal).toBe("Legacy goal");
+    });
+
+    it("/build without args provides friendly fallback guidance when no approved plan exists", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-default-fallback" },
+      };
+
+      await commands["build"]("", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("/build Add CSV export"),
+        "warning"
+      );
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("/build --from-plan"),
+        "warning"
+      );
     });
   });
 });
