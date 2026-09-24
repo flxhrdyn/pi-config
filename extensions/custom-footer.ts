@@ -666,10 +666,10 @@ export default function (pi: ExtensionAPI) {
               const stat = fs.statSync(fullPath);
               let preview = "";
 
-              // Baca baris pertama untuk mengambil judul atau pesan pertama
+              // Baca isi file untuk mengambil judul atau pesan pertama yang bermakna
               try {
-                const head = fs.readFileSync(fullPath, "utf8").slice(0, 4000);
-                for (const line of head.split("\n")) {
+                const content = fs.readFileSync(fullPath, "utf8");
+                for (const line of content.split("\n")) {
                   if (!line) continue;
                   const obj = JSON.parse(line);
                   if (obj.type === "session_info" && obj.name) {
@@ -677,10 +677,19 @@ export default function (pi: ExtensionAPI) {
                     break;
                   }
                   if (obj.type === "message" && obj.message?.role === "user") {
-                    const txt = obj.message.content?.find?.((c: any) => c.type === "text")?.text;
-                    if (txt) {
-                      preview = txt.replace(/\s+/g, " ").trim().slice(0, 45);
-                      break;
+                    const parts = obj.message.content;
+                    if (Array.isArray(parts)) {
+                      const txt = parts.find((p: any) => p.type === "text" && p.text && p.text.trim())?.text;
+                      if (txt) {
+                        const clean = txt.replace(/\s+/g, " ").trim();
+                        if (clean.length > 0 && !clean.startsWith("Attached image")) {
+                          // Prioritaskan pesan substantif daripada salam pendek
+                          if (!preview || preview.length < 5) {
+                            preview = clean.slice(0, 46);
+                            if (clean.length > 5) break;
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -690,7 +699,7 @@ export default function (pi: ExtensionAPI) {
                 path: fullPath,
                 filename: item.name,
                 time: stat.mtime,
-                preview: preview || "Untitled session",
+                preview: preview || "Percakapan kosong",
                 sizeKb: (stat.size / 1024).toFixed(0) + "KB",
               });
             }
@@ -720,7 +729,7 @@ export default function (pi: ExtensionAPI) {
         return `${timeStr.padEnd(16)} │ ${s.preview.padEnd(46)} │ ${s.sizeKb}`;
       });
 
-      const selected = await ctx.ui.select("  󰊠 RESUME SESSION (Telescope History)  ", options);
+      const selected = await ctx.ui.select("RESUME SESSION (Telescope History)", options);
       if (!selected) return;
 
       const idx = options.indexOf(selected);
