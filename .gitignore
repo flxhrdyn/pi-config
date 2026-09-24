@@ -1,6 +1,7 @@
 # Secrets & credentials
 auth.json
 models-store.json
+models.json
 9router-config.json
 *.key
 *.token

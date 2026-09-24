@@ -9,7 +9,17 @@ import * as os from "node:os";
 function formatModelDisplayName(rawId: string): string {
   if (!rawId) return "pi";
 
-  let clean = rawId.replace(/^(ag|cx|openai|google|anthropic|9router)\//i, "");
+  let clean = rawId.replace(/^(ag|cx|openai|google|anthropic|9router|opencode-zen)\//i, "");
+
+  if (/^opencode\//i.test(clean)) {
+    const sub = clean.slice(9);
+    if (sub.includes("muse-spark-1.3")) return "Muse Spark 1.3 Free";
+    if (sub.includes("muse-spark-1.2")) return "Muse Spark 1.2 Free";
+    if (sub.includes("mimo-v2.6")) return "MiMo-V2.6-Flash Free";
+    if (sub.includes("ling-3.0")) return "Ling 3.0 Flash Fin Free";
+    if (sub.includes("nemotron-3.5")) return "Nemotron 3.5 Lightning Free";
+    if (sub.includes("nemotron-3")) return "Nemotron 3 Ultra Free";
+  }
 
   if (/^gemini/i.test(clean)) {
     const parts = clean.split("-");
