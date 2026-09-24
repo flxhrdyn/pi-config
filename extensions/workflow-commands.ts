@@ -147,6 +147,33 @@ export function formatReviewPrompt(targetContext?: string): string {
   ].join("\n");
 }
 
+// Ekstrak cuplikan konteks bersih dari pesan user dan asisten terakhir
+export function extractCleanContext(entries: any[]): string {
+  if (!Array.isArray(entries) || entries.length === 0) return "";
+  const conversation = entries
+    .filter((e) => e.type === "message" && (e.message?.role === "user" || e.message?.role === "assistant"))
+    .slice(-6);
+
+  const lines: string[] = [];
+  for (const entry of conversation) {
+    const role = entry.message.role === "user" ? "User" : "Assistant";
+    let text = "";
+    if (Array.isArray(entry.message.content)) {
+      text = entry.message.content
+        .filter((c: any) => c.type === "text" && c.text)
+        .map((c: any) => c.text)
+        .join(" ");
+    } else if (typeof entry.message.content === "string") {
+      text = entry.message.content;
+    }
+    const clean = text.replace(/\s+/g, " ").trim();
+    if (clean && !clean.startsWith("Attached image") && !clean.startsWith("<skill")) {
+      lines.push(`${role}: ${clean.slice(0, 150)}`);
+    }
+  }
+  return lines.join("\n").slice(0, 600);
+}
+
 // Panggil model ringan secara detached untuk menjawab pertanyaan sampingan tanpa mencemari riwayat utama
 export async function queryBtwAnswer(question: string, contextSummary: string): Promise<string> {
   const configPath = path.join(os.homedir(), ".pi", "agent", "9router-config.json");
@@ -311,11 +338,7 @@ export default function (pi: ExtensionAPI) {
     let contextSummary = "";
     try {
       const entries = (ctx.sessionManager?.getEntries?.() || []) as any[];
-      const recent = entries.slice(-6);
-      contextSummary = recent
-        .filter((e) => e.type === "message" && e.message?.content)
-        .map((e) => `${e.message.role}: ${JSON.stringify(e.message.content).slice(0, 100)}`)
-        .join("\n");
+      contextSummary = extractCleanContext(entries);
     } catch {}
 
     // Jalankan secara paralel di background tanpa memblokir atau menahan streaming turn utama
@@ -354,11 +377,7 @@ export default function (pi: ExtensionAPI) {
       let contextSummary = "";
       try {
         const entries = (ctx.sessionManager?.getEntries?.() || []) as any[];
-        const recent = entries.slice(-6);
-        contextSummary = recent
-          .filter((e) => e.type === "message" && e.message?.content)
-          .map((e) => `${e.message.role}: ${JSON.stringify(e.message.content).slice(0, 100)}`)
-          .join("\n");
+        contextSummary = extractCleanContext(entries);
       } catch {}
 
       ctx.ui?.notify?.(`[BTW] Memproses pertanyaan sampingan...`, "info");
