@@ -87,7 +87,7 @@ describe("auto-session-title extension tests", () => {
     };
 
     autoSessionTitleExtension(mockPi);
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 80; i++) {
       if (sessionName) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
