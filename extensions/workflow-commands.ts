@@ -242,10 +242,11 @@ export default function (pi: ExtensionAPI) {
     return null;
   }
 
-  // Helper menampilkan popup modal dialog /btw (persis seperti /model box)
+  // Helper menampilkan selector panel /btw (persis seperti dialog /model)
   async function showBtwModal(ctx: any, question: string, answerText: string) {
     if (!ctx.ui?.custom) return;
 
+    // Tanpa overlay: true agar menggantikan editor area persis seperti showModelSelector
     await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
       return {
         dispose() {},
@@ -259,48 +260,39 @@ export default function (pi: ExtensionAPI) {
           return true;
         },
         render(width: number): string[] {
-          const maxBoxWidth = Math.min(width - 4, 76);
-          const innerW = maxBoxWidth - 4;
+          const borderLine = theme.fg("borderAccent", "─".repeat(width));
+          const qLines = wrapText(question, Math.max(20, width - 4));
+          const aLines = wrapText(answerText, Math.max(20, width - 4));
 
-          const qLines = wrapText(`Q: ${question}`, innerW);
-          const aLines = wrapText(answerText, innerW);
-
-          const borderCol = (s: string) => theme.fg("borderAccent", s);
-          const padLine = (content: string, rawLen: number) => {
-            const gap = Math.max(0, innerW - rawLen);
-            return `${borderCol("│")}  ${content}${" ".repeat(gap)}${borderCol("│")}`;
-          };
-
-          const titleText = theme.bold(theme.fg("accent", "BY-THE-WAY SIDE QUESTION"));
-          const titleLen = getVisibleWidth("BY-THE-WAY SIDE QUESTION");
-
-          const box: string[] = [
-            borderCol("╭" + "─".repeat(innerW + 2) + "╮"),
-            padLine(titleText, titleLen),
-            borderCol("├" + "─".repeat(innerW + 2) + "┤"),
+          const lines: string[] = [
+            borderLine,
+            theme.bold(theme.fg("warning", "By-The-Way Side Question")),
+            "",
           ];
 
-          for (const q of qLines) {
-            box.push(padLine(theme.fg("warning", q), getVisibleWidth(q)));
+          // Question line ala input model selector
+          lines.push(theme.fg("accent", "› ") + theme.bold(theme.fg("text", qLines[0])));
+          for (let i = 1; i < qLines.length; i++) {
+            lines.push("  " + theme.bold(theme.fg("text", qLines[i])));
           }
 
-          box.push(borderCol("├" + "─".repeat(innerW + 2) + "┤"));
+          lines.push("");
 
+          // Answer lines
           for (const a of aLines) {
-            box.push(padLine(theme.fg("text", a), getVisibleWidth(a)));
+            lines.push("  " + theme.fg("text", a));
           }
 
-          box.push(borderCol("├" + "─".repeat(innerW + 2) + "┤"));
-          const hint = theme.fg("dim", "Press ESC, ENTER, or Q to close (main task runs untouched)");
-          box.push(padLine(hint, getVisibleWidth("Press ESC, ENTER, or Q to close (main task runs untouched)")));
-          box.push(borderCol("╰" + "─".repeat(innerW + 2) + "╯"));
+          lines.push("");
+          lines.push(
+            theme.fg("dim", "Escape / Enter to close  ·  main task runs in background")
+          );
+          lines.push(borderLine);
 
-          const padLeft = Math.max(1, Math.floor((width - (innerW + 4)) / 2));
-          const pad = " ".repeat(padLeft);
-          return ["", ...box.map((l) => pad + l), ""];
+          return lines;
         },
       };
-    }, { overlay: true });
+    });
   }
 
   // Intercept input: Jika streaming sedang aktif dan user mengetik /btw, jalankan query out-of-band paralel
