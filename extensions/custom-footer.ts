@@ -523,22 +523,11 @@ export default function (pi: ExtensionAPI) {
       const toolsSummary = Object.entries(combinedToolCounts)
         .sort((a, b) => b[1] - a[1])
         .map(([t, count]) => `${t}: ${count}`)
-        .join(", ");
+        .join("  ");
 
-      const statsText = [
-        "┌────────────────────────────────────────────────────────┐",
-        "│  SESSION STATISTICS                                    │",
-        "├────────────────────────────────────────────────────────┤",
-        `│  Model          : ${modelName}${thinking}`.padEnd(57) + "│",
-        `│  Context Usage  : ${tokenUsage}`.padEnd(57) + "│",
-        `│  Turns Active   : ${sessionTurns} turn(s)`.padEnd(57) + "│",
-        `│  Tool Calls     : ${sessionToolCalls} total (${toolsSummary || "none"})`.padEnd(57) + "│",
-        `│  Session Uptime : ${uptimeStr}`.padEnd(57) + "│",
-        `│  Working Dir    : ${process.cwd().replace(/\\/g, "/")}`.padEnd(57) + "│",
-        "├────────────────────────────────────────────────────────┤",
-        "│  Press ESC, ENTER, or Q to close                       │",
-        "└────────────────────────────────────────────────────────┘",
-      ].join("\n");
+      const cwd = process.cwd();
+      const home = os.homedir();
+      const cleanCwd = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
 
       await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
         return {
@@ -552,26 +541,73 @@ export default function (pi: ExtensionAPI) {
             return true;
           },
           render(width: number): string[] {
-            const lines = statsText.split("\n").map((line, idx) => {
-              if (idx === 0 || idx === 2 || idx === 9 || idx === 11) {
-                return theme.fg("borderAccent", line);
-              }
-              if (idx === 1) {
-                return theme.bold(theme.fg("accent", line));
-              }
-              if (idx === 10) {
-                return theme.fg("dim", line);
-              }
-              return theme.fg("text", line);
-            });
+            const innerW = 58;
+            const borderCol = (s: string) => theme.fg("borderAccent", s);
+
+            const formatLine = (label: string, valFormatted: string, rawValLen: number) => {
+              const left = `  ${label ? theme.fg("dim", label.padEnd(12)) : " ".repeat(12)}${valFormatted}`;
+              const rawTotalLen = 2 + 12 + rawValLen;
+              const padRight = Math.max(0, innerW - rawTotalLen);
+              return `${borderCol("│")}${left}${" ".repeat(padRight)}${borderCol("│")}`;
+            };
+
+            const headerVal = theme.bold(theme.fg("accent", "SESSION OVERVIEW")) + theme.fg("dim", " • π v0.87.1");
+            const headerLen = visibleWidth("SESSION OVERVIEW • π v0.87.1");
+
+            const modelVal = theme.fg("syntaxFunction", `${modelName}${thinking}`);
+            const modelLen = visibleWidth(`${modelName}${thinking}`);
+
+            // Progress bar context
+            let ctxPercent = 0;
+            try {
+              const u = ctx.getContextUsage?.();
+              if (u?.percent) ctxPercent = Math.round(u.percent);
+            } catch {}
+            const barLen = 10;
+            const filled = Math.min(barLen, Math.max(0, Math.round((ctxPercent / 100) * barLen)));
+            const bar = theme.fg("warning", "█".repeat(filled)) + theme.fg("dim", "░".repeat(barLen - filled));
+            const ctxVal = `${tokenUsage}  ${bar}`;
+            const ctxLen = visibleWidth(`${tokenUsage}  ${"█".repeat(filled)}${"░".repeat(barLen - filled)}`);
+
+            const actVal = theme.fg("text", `${sessionTurns} turn(s)`) + theme.fg("dim", " • ") + theme.fg("accent", `${sessionToolCalls} tools executed`);
+            const actLen = visibleWidth(`${sessionTurns} turn(s) • ${sessionToolCalls} tools executed`);
+
+            const breakdownVal = theme.fg("muted", toolsSummary || "none");
+            const breakdownLen = visibleWidth(toolsSummary || "none");
+
+            const uptimeVal = theme.fg("text", uptimeStr);
+            const uptimeLen = visibleWidth(uptimeStr);
+
+            const wsVal = theme.fg("text", cleanCwd);
+            const wsLen = visibleWidth(cleanCwd);
+
+            const dismissVal = theme.fg("dim", "esc / enter / q to dismiss");
+            const dismissLen = visibleWidth("esc / enter / q to dismiss");
+
+            const boxLines = [
+              borderCol("╭" + "─".repeat(innerW) + "╮"),
+              formatLine("OVERVIEW", headerVal, headerLen),
+              borderCol("├" + "─".repeat(innerW) + "┤"),
+              formatLine("Model", modelVal, modelLen),
+              formatLine("Context", ctxVal, ctxLen),
+              formatLine("Activity", actVal, actLen),
+              formatLine("Breakdown", breakdownVal, breakdownLen),
+              formatLine("Uptime", uptimeVal, uptimeLen),
+              formatLine("Workspace", wsVal, wsLen),
+              borderCol("├" + "─".repeat(innerW) + "┤"),
+              formatLine("", dismissVal, dismissLen),
+              borderCol("╰" + "─".repeat(innerW) + "╯"),
+            ];
 
             // Center box horizontally
-            return lines.map((l) => {
-              const padLeft = Math.max(1, Math.floor((width - 58) / 2));
-              return " ".repeat(padLeft) + l;
-            });
+            const padLeft = Math.max(1, Math.floor((width - (innerW + 2)) / 2));
+            const pad = " ".repeat(padLeft);
+            return ["", ...boxLines.map((l) => pad + l), ""];
           },
         };
+      }, { overlay: true });
+    },
+  });
       }, { overlay: true });
     },
   });
