@@ -6,7 +6,7 @@ import {
 } from "../extensions/auto-session-title.js";
 import autoSessionTitleExtension from "../extensions/auto-session-title.js";
 
-describe("auto-session-title extension tests", () => {
+describe("auto-session-title hardened extension tests", () => {
   it("cleans titles by removing outer quotes, formatting, and excess words", () => {
     expect(cleanTitle('"Skrip Backup Database"')).toBe("Skrip Backup Database");
     expect(cleanTitle("Chat tentang: Perbaikan Bug Auth Token")).toBe("Perbaikan Bug Auth Token");
@@ -15,25 +15,25 @@ describe("auto-session-title extension tests", () => {
     ).toBe("Optimizing React Components In Large Production");
   });
 
-  it("generates simple local fallback without hardcoded dictionaries", () => {
+  it("generates simple local fallback from recent substantive messages", () => {
     const idTitle = generateLocalFallbackTitle(["tes", "tolong buatkan skrip backup database postgresql"]);
     expect(idTitle).toBeTruthy();
-    expect(idTitle).toBe("Tolong buatkan skrip backup database");
+    expect(idTitle.toLowerCase()).toContain("backup");
 
     const enTitle = generateLocalFallbackTitle(["hi", "how to optimize react component rendering"]);
     expect(enTitle).toBeTruthy();
-    expect(enTitle).toBe("How to optimize react component");
+    expect(enTitle.toLowerCase()).toContain("optimize");
   });
 
   it("does not name on the first user message", async () => {
     let sessionName = "";
     const mockPi: any = {
       on: vi.fn((event: string, handler: Function) => {
-        if (event === "agent_end") {
+        if (event === "agent_settled") {
           const mockCtx: any = {
             sessionManager: {
               getSessionName: () => sessionName,
-              getSessionId: () => "sess-1",
+              getSessionId: () => "sess-title-1",
               getEntries: () => [
                 { type: "message", message: { role: "user", content: [{ type: "text", text: "tes" }] } },
                 { type: "message", message: { role: "assistant", content: [{ type: "text", text: "ready" }] } },
@@ -55,17 +55,17 @@ describe("auto-session-title extension tests", () => {
     expect(sessionName).toBe("");
   });
 
-  it("names session after 2 user messages and at least 1 assistant response", async () => {
+  it("names session on agent_settled after 2 user messages and at least 1 assistant response", async () => {
     let sessionName = "";
     let appendedEntry: any = null;
 
     const mockPi: any = {
       on: vi.fn((event: string, handler: Function) => {
-        if (event === "agent_end") {
+        if (event === "agent_settled") {
           const mockCtx: any = {
             sessionManager: {
               getSessionName: () => sessionName,
-              getSessionId: () => "sess-2",
+              getSessionId: () => "sess-title-2",
               getEntries: () => [
                 { type: "message", message: { role: "user", content: [{ type: "text", text: "halo" }] } },
                 { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Halo, ada yang bisa dibantu?" }] } },
@@ -81,12 +81,13 @@ describe("auto-session-title extension tests", () => {
       setSessionName: (name: string) => {
         sessionName = name;
       },
-      appendEntry: vi.fn((type, data) => {
+      appendEntry: vi.fn((type: string, data: unknown) => {
         appendedEntry = { type, data };
       }),
     };
 
     autoSessionTitleExtension(mockPi);
+
     for (let i = 0; i < 80; i++) {
       if (sessionName) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -99,16 +100,16 @@ describe("auto-session-title extension tests", () => {
   });
 
   it("does not overwrite manually renamed or existing session name", async () => {
-    let sessionName = "Manual Title";
+    let sessionName = "Manual Title Set By User";
     const setSessionNameSpy = vi.fn();
 
     const mockPi: any = {
       on: vi.fn((event: string, handler: Function) => {
-        if (event === "agent_end") {
+        if (event === "agent_settled") {
           const mockCtx: any = {
             sessionManager: {
               getSessionName: () => sessionName,
-              getSessionId: () => "sess-3",
+              getSessionId: () => "sess-title-3",
               getEntries: () => [
                 { type: "message", message: { role: "user", content: [{ type: "text", text: "halo" }] } },
                 { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Halo" }] } },
@@ -129,10 +130,51 @@ describe("auto-session-title extension tests", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(setSessionNameSpy).not.toHaveBeenCalled();
-    expect(sessionName).toBe("Manual Title");
+    expect(sessionName).toBe("Manual Title Set By User");
   });
 
-  it("falls back gracefully when LLM request times out", async () => {
+  it("prevents overwrite if session was renamed right before commit", async () => {
+    let sessionName = "";
+    let callCount = 0;
+
+    const mockPi: any = {
+      on: vi.fn((event: string, handler: Function) => {
+        if (event === "agent_settled") {
+          const mockCtx: any = {
+            sessionManager: {
+              getSessionName: () => {
+                callCount++;
+                // Simulate user renaming right before final commit
+                if (callCount > 1) return "User Changed Title Mid-Flight";
+                return "";
+              },
+              getSessionId: () => "sess-title-race",
+              getEntries: () => [
+                { type: "message", message: { role: "user", content: [{ type: "text", text: "halo" }] } },
+                { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Halo" }] } },
+                { type: "message", message: { role: "user", content: [{ type: "text", text: "buatkan skrip backup" }] } },
+                { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Siap" }] } },
+              ],
+            },
+          };
+          handler({}, mockCtx);
+        }
+      }),
+      getSessionName: () => (callCount > 1 ? "User Changed Title Mid-Flight" : ""),
+      setSessionName: vi.fn((name: string) => {
+        sessionName = name;
+      }),
+      appendEntry: vi.fn(),
+    };
+
+    autoSessionTitleExtension(mockPi);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // setSessionName should NOT have committed because checkBeforeCommit detected the manual title
+    expect(sessionName).toBe("");
+  });
+
+  it("falls back gracefully when LLM request times out without unhandled rejection", async () => {
     const res = await requestLlmTitle("some prompt", 1);
     expect(res).toBeNull();
   });

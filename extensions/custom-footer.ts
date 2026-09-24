@@ -278,7 +278,7 @@ export default function (pi: ExtensionAPI) {
       clearInterval(timerId);
       timerId = null;
     }
-    ctx.ui.setWidget("codex-loading", undefined, { placement: "above-editor" });
+    ctx.ui.setWidget("codex-loading", undefined, { placement: "aboveEditor" });
     requestTuiRender?.();
   });
 
@@ -292,7 +292,7 @@ export default function (pi: ExtensionAPI) {
     const metaPart = ctx.ui.theme.fg("dim", ` (${elapsedSec}s • <esc> to stop)`);
     const line = `${spinner} ${actionPart}${detailPart}${metaPart}`;
 
-    ctx.ui.setWidget("codex-loading", [line, ""], { placement: "above-editor" });
+    ctx.ui.setWidget("codex-loading", [line, ""], { placement: "aboveEditor" });
   }
 
   function initCleanVimUI(ctx: any) {
@@ -548,7 +548,7 @@ export default function (pi: ExtensionAPI) {
       const home = os.homedir();
       const cleanCwd = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
 
-      await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
+      await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: (res?: unknown) => void) => {
         return {
           dispose() {},
           invalidate() {},

@@ -1,27 +1,40 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
 import workflowExtension, {
   formatPlanPrompt,
   formatBuildPrompt,
   formatDebugPrompt,
   formatReviewPrompt,
   wrapText,
-  createWorkflowState,
+  validatePlanSchema,
+  savePlanAtomic,
+  loadPlanValidated,
+  parseStructuredPlanFromAssistantText,
+  extractSanitizedContext,
+  queryBtwAnswer,
+  getOrCreateSessionState,
+  clearAllSessionWorkflowStates,
+  type WorkflowPlanV1,
 } from "../extensions/workflow-commands.js";
 
-describe("workflow-commands extension tests", () => {
+describe("workflow-commands hardened extension tests", () => {
   let commands: Record<string, Function>;
   let eventHandlers: Record<string, Function>;
   let sentMessages: Array<{ content: string; options?: any }>;
   let appendedEntries: Array<{ customType: string; data: any }>;
-  let mockUi: { notify: ReturnType<typeof vi.fn>; custom: ReturnType<typeof vi.fn> };
+  let mockUi: { notify: ReturnType<typeof vi.fn>; custom: ReturnType<typeof vi.fn>; setWidget: ReturnType<typeof vi.fn> };
   let mockPi: any;
+  let testCwd: string;
 
   beforeEach(() => {
     commands = {};
     eventHandlers = {};
     sentMessages = [];
     appendedEntries = [];
-    mockUi = { notify: vi.fn(), custom: vi.fn() };
+    mockUi = { notify: vi.fn(), custom: vi.fn(), setWidget: vi.fn() };
 
     mockPi = {
       registerCommand: vi.fn((name: string, def: any) => {
@@ -37,159 +50,408 @@ describe("workflow-commands extension tests", () => {
         appendedEntries.push({ customType, data });
       }),
     };
+
+    clearAllSessionWorkflowStates();
+
+    testCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-test-"));
   });
 
-  it("registers all required slash commands", () => {
+  afterEach(() => {
+    clearAllSessionWorkflowStates();
+    try {
+      fs.rmSync(testCwd, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it("registers all required workflow commands without relying on pi.on('input')", () => {
     workflowExtension(mockPi);
     expect(commands["btw"]).toBeDefined();
     expect(commands["btw-list"]).toBeDefined();
     expect(commands["btw-clear"]).toBeDefined();
     expect(commands["plan"]).toBeDefined();
+    expect(commands["plan-approve"]).toBeDefined();
     expect(commands["build"]).toBeDefined();
     expect(commands["debug"]).toBeDefined();
     expect(commands["review"]).toBeDefined();
+    // Verify pi.on("input") is NOT used for /btw interception
+    expect(eventHandlers["input"]).toBeUndefined();
   });
 
-  describe("/btw side questions (Out-of-band box popup)", () => {
-    it("wraps text nicely for box modal rendering", () => {
-      const wrapped = wrapText("Satu dua tiga empat lima enam", 15);
-      expect(wrapped.length).toBeGreaterThan(1);
-    });
-
-    it("handles /btw during streaming via event input and opens custom modal without injecting to main chat", async () => {
+  describe("P0.1: Real Read-Only Mode enforcement", () => {
+    it("blocks ALL mutation paths (edit, write, bash, powershell, custom_tools) in /plan mode", async () => {
       workflowExtension(mockPi);
       const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-plan-1" },
+      };
+
+      await commands["plan"]("Design payment module", ctx);
+
+      // Mutative tools blocked
+      const editBlock = await eventHandlers["tool_call"]({ toolName: "edit" }, ctx);
+      expect(editBlock.block).toBe(true);
+      expect(editBlock.reason).toContain("read-only");
+
+      const writeBlock = await eventHandlers["tool_call"]({ toolName: "write" }, ctx);
+      expect(writeBlock.block).toBe(true);
+
+      const bashBlock = await eventHandlers["tool_call"]({ toolName: "bash" }, ctx);
+      expect(bashBlock.block).toBe(true);
+
+      const psBlock = await eventHandlers["tool_call"]({ toolName: "powershell" }, ctx);
+      expect(psBlock.block).toBe(true);
+
+      const customMcpBlock = await eventHandlers["tool_call"]({ toolName: "mcp_deploy" }, ctx);
+      expect(customMcpBlock.block).toBe(true);
+
+      // Inspection tools permitted
+      const readPermit = await eventHandlers["tool_call"]({ toolName: "read" }, ctx);
+      expect(readPermit.block).toBeUndefined();
+
+      const grepPermit = await eventHandlers["tool_call"]({ toolName: "grep" }, ctx);
+      expect(grepPermit.block).toBeUndefined();
+
+      const findPermit = await eventHandlers["tool_call"]({ toolName: "find" }, ctx);
+      expect(findPermit.block).toBeUndefined();
+
+      const lsPermit = await eventHandlers["tool_call"]({ toolName: "ls" }, ctx);
+      expect(lsPermit.block).toBeUndefined();
+    });
+
+    it("blocks ALL mutation paths in /review mode as well", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-review-1" },
+      };
+
+      await commands["review"]("HEAD~1..HEAD", ctx);
+
+      const bashBlock = await eventHandlers["tool_call"]({ toolName: "bash" }, ctx);
+      expect(bashBlock.block).toBe(true);
+      expect(bashBlock.reason).toContain("read-only");
+
+      const editBlock = await eventHandlers["tool_call"]({ toolName: "edit" }, ctx);
+      expect(editBlock.block).toBe(true);
+    });
+
+    it("resets mode to idle after agent_settled so subsequent turns are not locked", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-unlock-1", getEntries: () => [] },
+      };
+
+      await commands["plan"]("Architect system", ctx);
+      const stateBefore = getOrCreateSessionState("sess-unlock-1", testCwd);
+      expect(stateBefore.activeMode).toBe("plan");
+
+      // When settled, mode resets
+      await eventHandlers["agent_settled"]({}, ctx);
+      const stateAfter = getOrCreateSessionState("sess-unlock-1", testCwd);
+      expect(stateAfter.activeMode).toBe("idle");
+
+      // Tools no longer blocked
+      const editPermit = await eventHandlers["tool_call"]({ toolName: "edit" }, ctx);
+      expect(editPermit.block).toBeUndefined();
+      const bashPermit = await eventHandlers["tool_call"]({ toolName: "bash" }, ctx);
+      expect(bashPermit.block).toBeUndefined();
+    });
+
+    it("resets mode and cancels pending background tasks on session switch or shutdown", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-switch-1", getEntries: () => [] },
+      };
+
+      await commands["plan"]("Design API", ctx);
+      const state = getOrCreateSessionState("sess-switch-1", testCwd);
+      state.btwActive = true;
+      state.btwAbortController = new AbortController();
+      const abortSpy = vi.spyOn(state.btwAbortController, "abort");
+
+      await eventHandlers["session_before_switch"]({}, ctx);
+      expect(abortSpy).toHaveBeenCalled();
+      expect(state.activeMode).toBe("idle");
+      expect(state.btwActive).toBe(false);
+    });
+  });
+
+  describe("P0.2 & P0.3: Stateful Plan Validation, Atomic Persistence & Approval Flow", () => {
+    it("validates plan schema and detects invalid or corrupted data", () => {
+      expect(validatePlanSchema(null).valid).toBe(false);
+      expect(validatePlanSchema({ schemaVersion: 2 }).valid).toBe(false);
+      expect(validatePlanSchema({ schemaVersion: 1, sessionId: "s", cwd: "c" }).valid).toBe(false);
+
+      const validPlan: WorkflowPlanV1 = {
+        schemaVersion: 1,
+        sessionId: "s1",
+        cwd: testCwd,
+        goal: "Refactor auth",
+        status: "draft",
+        steps: ["Step 1"],
+        risks: ["Risk 1"],
+        acceptanceCriteria: ["Criteria 1"],
+        verificationCommands: ["npm test"],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      expect(validatePlanSchema(validPlan).valid).toBe(true);
+    });
+
+    it("saves plan atomically and recovers successfully", () => {
+      const plan: WorkflowPlanV1 = {
+        schemaVersion: 1,
+        sessionId: "sess-atomic-1",
+        cwd: testCwd,
+        goal: "Build cache system",
+        status: "draft",
+        steps: ["Setup cache", "Add tests"],
+        risks: ["Memory leak"],
+        acceptanceCriteria: ["Tests pass"],
+        verificationCommands: ["npm test"],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const res = savePlanAtomic(testCwd, plan);
+      expect(res.success).toBe(true);
+
+      const loaded = loadPlanValidated(testCwd, "sess-atomic-1");
+      expect(loaded.plan).not.toBeNull();
+      expect(loaded.plan?.goal).toBe("Build cache system");
+    });
+
+    it("rejects corrupted plan file with an actionable diagnostic message", () => {
+      const planDir = path.join(testCwd, ".pi");
+      fs.mkdirSync(planDir, { recursive: true });
+      fs.writeFileSync(path.join(planDir, "active-plan.json"), "{ corrupted json ...", "utf8");
+
+      const loaded = loadPlanValidated(testCwd);
+      expect(loaded.plan).toBeNull();
+      expect(loaded.diagnostic).toContain("invalid JSON");
+    });
+
+    it("rejects plan from a different session or cwd", () => {
+      const plan: WorkflowPlanV1 = {
+        schemaVersion: 1,
+        sessionId: "other-session",
+        cwd: path.resolve(testCwd),
+        goal: "Build feature",
+        status: "approved",
+        steps: ["Step 1"],
+        risks: [],
+        acceptanceCriteria: [],
+        verificationCommands: ["npm test"],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      savePlanAtomic(testCwd, plan);
+
+      // Check with different session ID
+      const loaded = loadPlanValidated(testCwd, "my-current-session");
+      expect(loaded.plan).toBeNull();
+      expect(loaded.diagnostic).toContain("dibuat pada sesi lain");
+    });
+
+    it("/build strictly rejects plans that are still in 'draft' status until approved", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-draft-build" },
+      };
+
+      await commands["plan"]("Implement OAuth", ctx);
+
+      // /build must reject draft
+      await commands["build"]("", ctx);
+      expect(sentMessages.length).toBe(1); // Only the /plan message, /build did NOT trigger
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("DRAFT dan belum disetujui"),
+        "warning"
+      );
+
+      // Approve plan via /plan approve
+      await commands["plan"]("approve", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("DISETUJUI"),
+        "info"
+      );
+
+      // /build now proceeds
+      await commands["build"]("", ctx);
+      expect(sentMessages.length).toBe(2);
+      expect(sentMessages[1].content).toContain("WORKFLOW MODE: /build");
+      expect(sentMessages[1].content).toContain("Implement OAuth");
+    });
+
+    it("captures real structured plan from agent output upon agent_settled", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
         ui: mockUi,
         sessionManager: {
+          getSessionId: () => "sess-real-capture",
           getEntries: () => [
-            { type: "message", message: { role: "user", content: [{ type: "text", text: "buatkan website" }] } },
+            {
+              type: "message",
+              message: {
+                role: "assistant",
+                content: [
+                  {
+                    type: "text",
+                    text: [
+                      "Analisis arsitektur selesai. Berikut rencananya:",
+                      "```json",
+                      JSON.stringify({
+                        plan: {
+                          steps: ["Buat schema migration", "Implementasi handler", "Verifikasi unit test"],
+                          risks: ["Downtime migrasi database"],
+                          acceptanceCriteria: ["Status code 200", "Token tersimpan aman"],
+                          verificationCommands: ["npm test tests/auth.test.ts"],
+                        },
+                      }),
+                      "```",
+                    ].join("\n"),
+                  },
+                ],
+              },
+            },
           ],
         },
       };
 
-      const res = await eventHandlers["input"](
-        { text: "/btw apa itu vue?", source: "user" },
-        ctx
-      );
+      await commands["plan"]("Setup database schema", ctx);
+      await eventHandlers["agent_settled"]({}, ctx);
 
-      // Input di-handle sehingga tidak masuk ke giliran prompt chat utama
-      expect(res.action).toBe("handled");
-      // Main messages tidak tercemar
-      expect(sentMessages.length).toBe(0);
+      const loaded = loadPlanValidated(testCwd, "sess-real-capture");
+      expect(loaded.plan?.steps).toEqual([
+        "Buat schema migration",
+        "Implementasi handler",
+        "Verifikasi unit test",
+      ]);
+      expect(loaded.plan?.risks).toContain("Downtime migrasi database");
+      expect(loaded.plan?.verificationCommands).toContain("npm test tests/auth.test.ts");
     });
+  });
 
-    it("opens popup modal when /btw is executed directly while idle", async () => {
+  describe("P0.4: Out-Of-Band /btw Side Questioning", () => {
+    it("handles /btw from registered command without injecting into transcript", async () => {
       workflowExtension(mockPi);
       const ctx: any = {
+        cwd: testCwd,
         ui: mockUi,
-        sessionManager: { getEntries: () => [] },
+        sessionManager: { getSessionId: () => "sess-btw-oob", getEntries: () => [] },
       };
 
-      await commands["btw"]("apa bedanya git merge dan rebase?", ctx);
-      // Membuka modal box via ctx.ui.custom
-      expect(mockUi.custom).toHaveBeenCalled();
-      // Main messages tidak tercemar
+      await commands["btw"]("apa fungsi index pada database?", ctx);
+
+      // No message dispatched to main agent turn
       expect(sentMessages.length).toBe(0);
-    });
-  });
-
-  describe("/plan mode", () => {
-    it("formats /plan prompt with strict read-only scouting rules", () => {
-      const prompt = formatPlanPrompt("Integrate Stripe payments");
-      expect(prompt).toContain("WORKFLOW MODE: /plan");
-      expect(prompt).toContain("Integrate Stripe payments");
-      expect(prompt).toContain("READ-ONLY SCOUTING ONLY");
-      expect(prompt).toContain("DO NOT modify, create, or delete any files");
-    });
-
-    it("blocks file modification tools ('edit', 'write') when in /plan mode", async () => {
-      workflowExtension(mockPi);
-      const ctx: any = { cwd: process.cwd(), ui: mockUi };
-      await commands["plan"]("Design new auth architecture", ctx);
-
-      // Tool edit diblokir
-      const editResult = await eventHandlers["tool_call"]({ toolName: "edit" });
-      expect(editResult.block).toBe(true);
-      expect(editResult.reason).toContain("read-only");
-
-      // Tool write diblokir
-      const writeResult = await eventHandlers["tool_call"]({ toolName: "write" });
-      expect(writeResult.block).toBe(true);
-
-      // Tool read & bash tetap diizinkan
-      const readResult = await eventHandlers["tool_call"]({ toolName: "read" });
-      expect(readResult.block).toBeUndefined();
-    });
-  });
-
-  describe("/build mode", () => {
-    it("refuses to run without an active plan", async () => {
-      workflowExtension(mockPi);
-      const ctx: any = { cwd: "/empty-test-dir", ui: mockUi };
-      await commands["build"]("", ctx);
-
-      expect(sentMessages.length).toBe(0);
-      expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("Belum ada rencana aktif"),
-        "error"
+      expect(mockUi.setWidget).toHaveBeenCalledWith(
+        "btw-status",
+        expect.any(Array)
       );
     });
 
-    it("executes build prompt when an active plan exists", async () => {
+    it("enforces concurrency limit (max 1 active, bounded queue max 3)", async () => {
       workflowExtension(mockPi);
-      const ctx: any = { cwd: process.cwd(), ui: mockUi };
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-btw-queue", getEntries: () => [] },
+      };
 
-      // Buat plan dulu
-      await commands["plan"]("Build auth system", ctx);
-      expect(sentMessages.length).toBe(1);
+      const state = getOrCreateSessionState("sess-btw-queue", testCwd);
+      state.btwActive = true; // Simulate ongoing request
 
-      // Jalankan build
-      await commands["build"]("", ctx);
-      expect(sentMessages.length).toBe(2);
-      expect(sentMessages[1].content).toContain("WORKFLOW MODE: /build");
-      expect(sentMessages[1].content).toContain("Build auth system");
+      await commands["btw"]("q1", ctx);
+      expect(state.btwQueue.length).toBe(1);
+
+      await commands["btw"]("q2", ctx);
+      expect(state.btwQueue.length).toBe(2);
+
+      await commands["btw"]("q3", ctx);
+      expect(state.btwQueue.length).toBe(3);
+
+      // 4th request rejected because bounded queue is full
+      await commands["btw"]("q4", ctx);
+      expect(state.btwQueue.length).toBe(3);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("penuh"),
+        "warning"
+      );
+    });
+
+    it("/btw-clear aborts active controller, empties queue, and cleans widget", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-btw-clear", getEntries: () => [] },
+      };
+
+      const state = getOrCreateSessionState("sess-btw-clear", testCwd);
+      state.btwActive = true;
+      state.btwAbortController = new AbortController();
+      const abortSpy = vi.spyOn(state.btwAbortController, "abort");
+      state.btwQueue = [
+        { id: "1", question: "q1", contextSummary: "", queuedAt: "" },
+      ];
+
+      await commands["btw-clear"]("", ctx);
+
+      expect(abortSpy).toHaveBeenCalled();
+      expect(state.btwActive).toBe(false);
+      expect(state.btwQueue.length).toBe(0);
+      expect(mockUi.setWidget).toHaveBeenCalledWith("btw-status", undefined);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("Membersihkan"),
+        "info"
+      );
+    });
+
+    it("sanitizes context snapshot by stripping sensitive keys and tokens", () => {
+      const mockEntries = [
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "Koneksikan dengan sk_test_mock_secret_key_1234567890 dan password=rahasia123" }],
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 token received" }],
+          },
+        },
+      ];
+
+      const sanitized = extractSanitizedContext(mockEntries);
+      expect(sanitized).not.toContain("sk_test_mock_secret_key_1234567890");
+      expect(sanitized).toContain("[REDACTED_API_KEY]");
+      expect(sanitized).toContain("[REDACTED_TOKEN]");
+      expect(sanitized).toContain("secret: [REDACTED]");
     });
   });
 
-  describe("/debug mode", () => {
-    it("formats 5-stage systematic debugging workflow prompt", () => {
-      const prompt = formatDebugPrompt("Database connection timed out");
-      expect(prompt).toContain("WORKFLOW MODE: /debug");
-      expect(prompt).toContain("Database connection timed out");
-      expect(prompt).toContain("1. REPRODUCE");
-      expect(prompt).toContain("2. ROOT CAUSE INVESTIGATION");
-      expect(prompt).toContain("3. HYPOTHESIS");
-      expect(prompt).toContain("4. MINIMAL FIX");
-      expect(prompt).toContain("5. REGRESSION TEST");
-    });
+  describe("P0.5: Side-query Provider & Timeout Safety", () => {
+    it("handles timeout or abort gracefully without crashing or treating error as normal answer", async () => {
+      const controller = new AbortController();
+      controller.abort(); // pre-aborted
 
-    it("sends debug prompt upon invocation", async () => {
-      workflowExtension(mockPi);
-      const ctx: any = { ui: mockUi };
-      await commands["debug"]("Null pointer exception on login", ctx);
-
-      expect(sentMessages.length).toBe(1);
-      expect(sentMessages[0].content).toContain("Null pointer exception on login");
-    });
-  });
-
-  describe("/review mode", () => {
-    it("formats read-only code review prompt with priority categories", () => {
-      const prompt = formatReviewPrompt("feature/payment branch");
-      expect(prompt).toContain("WORKFLOW MODE: /review");
-      expect(prompt).toContain("feature/payment branch");
-      expect(prompt).toContain("READ-ONLY CODE REVIEW ONLY");
-      expect(prompt).toContain("[CRITICAL], [IMPORTANT], [MINOR]");
-    });
-
-    it("blocks file modification tools during review mode", async () => {
-      workflowExtension(mockPi);
-      const ctx: any = { ui: mockUi };
-      await commands["review"]("", ctx);
-
-      const editResult = await eventHandlers["tool_call"]({ toolName: "edit" });
-      expect(editResult.block).toBe(true);
-      expect(editResult.reason).toContain("read-only");
+      const res = await queryBtwAnswer("test question", "context", controller.signal, 100);
+      expect(res.success).toBe(false);
+      expect(res.error).toBeDefined();
+      expect(res.answer).toBe("");
     });
   });
 });

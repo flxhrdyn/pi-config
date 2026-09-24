@@ -1,0 +1,11 @@
+{
+  "name": "pi-config-extensions",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node ./npm/node_modules/vitest/vitest.mjs run",
+    "typecheck": "node ./npm/node_modules/typescript/bin/tsc --noEmit",
+    "lint": "node ./scripts/lint.mjs"
+  }
+}
