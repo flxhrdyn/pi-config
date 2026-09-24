@@ -721,15 +721,22 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Format opsi untuk SelectList
+      // Helper format waktu relatif ala Codex / Git (misal: "31m ago", "18h ago", "2d ago")
+      const formatTimeAgo = (date: Date) => {
+        const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+        if (sec < 60) return `${Math.max(1, sec)}s ago`;
+        const min = Math.floor(sec / 60);
+        if (min < 60) return `${min}m ago`;
+        const hr = Math.floor(min / 60);
+        if (hr < 24) return `${hr}h ago`;
+        const day = Math.floor(hr / 24);
+        return `${day}d ago`;
+      };
+
+      // Format opsi untuk SelectList ala Codex
       const options = sessionList.map((s) => {
-        const timeStr = s.time.toLocaleDateString("id-ID", {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        return `${timeStr.padEnd(16)} │ ${s.preview.padEnd(46)} │ ${s.sizeKb}`;
+        const ago = formatTimeAgo(s.time).padEnd(10);
+        return `${ago} │ ${s.preview}`;
       });
 
       const selected = await ctx.ui.select("RESUME SESSION (Telescope History)", options);

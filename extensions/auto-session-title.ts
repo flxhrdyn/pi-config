@@ -60,12 +60,13 @@ export async function requestLlmTitle(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // Instruksi universal: LLM mendeteksi sendiri bahasa percakapan dan merangkum dalam bahasa aslinya
-  const instruction = `Task: Provide a concise title (3 to 5 words) summarizing this user request: "${promptContext}".
+  // Instruksi bergaya Codex / Antigravity: judul berupa frasa aksi ringkas (imperative action)
+  const instruction = `Task: Summarize the primary objective of this user session into a short imperative action title of 3 to 5 words (similar to: "Perbaiki konflik ekstensi pi", "Putuskan Claude Code dari 9router", "Configure postgresql backup script", "Use terra model").
+User prompt: "${promptContext}"
 Rules:
 1. Match the exact language of the request (if Indonesian use Indonesian, if English use English).
 2. Do not translate.
-3. Output ONLY the title text. No quotes, no markdown, no explanation.`;
+3. Output ONLY the title text. No punctuation, no quotes, no conversational filler.`;
 
   try {
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {
