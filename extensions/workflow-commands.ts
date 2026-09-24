@@ -164,18 +164,19 @@ export async function queryBtwAnswer(question: string, contextSummary: string): 
   const baseUrl = cfg.baseUrl || "http://127.0.0.1:20128";
   const apiKey = cfg.apiKey || "";
 
+  // Timeout dinaikkan ke 15 detik untuk mengakomodasi model reasoning/cold start
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 6000);
+  const timer = setTimeout(() => controller.abort(), 15000);
 
   const prompt = [
-    `Context of current work: "${contextSummary.slice(0, 300)}"`,
-    `User side question: "${question}"`,
+    contextSummary ? `Konteks kerja saat ini: "${contextSummary.slice(0, 300)}"` : "",
+    `Pertanyaan sampingan user: "${question}"`,
     ``,
-    `Instructions:`,
-    `- Answer the side question directly, concisely, and accurately in 1 to 3 short paragraphs.`,
-    `- Match the language of the user's question.`,
-    `- Do NOT include greetings or filler. Output only the clear explanation.`,
-  ].join("\n");
+    `Instruksi:`,
+    `- Jawab pertanyaan sampingan secara langsung, ringkas, dan jelas dalam 1 hingga 2 paragraf pendek.`,
+    `- Gunakan bahasa yang sama dengan pertanyaan user.`,
+    `- Jangan berikan salam pembuka atau penutup. Berikan langsung penjelasannya.`,
+  ].filter(Boolean).join("\n");
 
   try {
     const res = await fetch(`${baseUrl}/v1/chat/completions`, {
@@ -203,7 +204,10 @@ export async function queryBtwAnswer(question: string, contextSummary: string): 
     return typeof content === "string" ? content.trim() : "Tidak ada respon dari model.";
   } catch (err: any) {
     clearTimeout(timer);
-    return `Koneksi timeout atau gagal: ${err.message || String(err)}`;
+    if (err.name === "AbortError" || String(err).includes("aborted")) {
+      return "Koneksi timeout (lebih dari 15 detik). Silakan coba lagi.";
+    }
+    return `Koneksi gagal: ${err.message || String(err)}`;
   }
 }
 
