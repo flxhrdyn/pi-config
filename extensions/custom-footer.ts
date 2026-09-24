@@ -107,6 +107,7 @@ export default function (pi: ExtensionAPI) {
   let startTime = 0;
   let frameIdx = 0;
   let currentAction = "Thinking";
+  let currentDetail = "";
   let isBusy = false;
   let requestTuiRender: (() => void) | null = null;
 
@@ -123,6 +124,7 @@ export default function (pi: ExtensionAPI) {
     startTime = Date.now();
     frameIdx = 0;
     currentAction = "Thinking";
+    currentDetail = "";
     isBusy = true;
 
     ctx.ui.setWorkingVisible(false);
@@ -180,11 +182,44 @@ export default function (pi: ExtensionAPI) {
     if (ev) {
       if (ev.type === "thinking_start" || ev.type === "thinking_delta") {
         currentAction = "Reasoning";
+        currentDetail = "";
       } else if (ev.type === "text_start" || ev.type === "text_delta") {
         currentAction = "Synthesizing";
+        currentDetail = "";
       }
     }
   });
+
+  function formatToolTarget(tool: string, args: any): string {
+    if (!args) return "";
+    const cwd = process.cwd();
+    const home = os.homedir();
+    const cleanPath = (p: string) => {
+      if (!p) return "";
+      const normalized = p.replace(/\\/g, "/");
+      const normCwd = cwd.replace(/\\/g, "/");
+      const normHome = home.replace(/\\/g, "/");
+      if (normalized.startsWith(normCwd + "/")) return normalized.slice(normCwd.length + 1);
+      if (normalized.startsWith(normHome)) return "~" + normalized.slice(normHome.length);
+      return normalized;
+    };
+
+    if (tool === "read" || tool === "edit" || tool === "write") {
+      const raw = args.file_path || args.path || "";
+      const p = cleanPath(raw);
+      const range = args.offset ? `:${args.offset}${args.limit ? `-${args.offset + args.limit - 1}` : ""}` : "";
+      return p ? `${p}${range}` : "";
+    }
+    if (tool === "bash") {
+      const cmd = args.command || "";
+      return cmd.length > 36 ? cmd.slice(0, 33) + "…" : cmd;
+    }
+    if (tool.includes("search") || tool === "find" || tool === "grep") {
+      const q = args.query || args.pattern || "";
+      return q ? `"${q}"` : "";
+    }
+    return "";
+  }
 
   pi.on("tool_execution_start", async (event, ctx) => {
     if (!ctx.hasUI) return;
@@ -194,6 +229,8 @@ export default function (pi: ExtensionAPI) {
     else if (tool === "bash") currentAction = "Executing";
     else if (tool.includes("search") || tool === "find" || tool === "grep") currentAction = "Searching";
     else currentAction = "Processing";
+
+    currentDetail = formatToolTarget(tool, event.args);
     updateWorkingWidget(ctx);
   });
 
@@ -206,6 +243,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     isBusy = false;
+    currentDetail = "";
     if (timerId) {
       clearInterval(timerId);
       timerId = null;
@@ -219,8 +257,10 @@ export default function (pi: ExtensionAPI) {
     const activeFrame = SPINNER_FRAMES[frameIdx];
 
     const spinner = ctx.ui.theme.fg("accent", activeFrame);
-    const text = ctx.ui.theme.fg("muted", `${currentAction}… (${elapsedSec}s • <esc> to stop)`);
-    const line = `${spinner} ${text}`;
+    const actionPart = ctx.ui.theme.fg("warning", currentAction);
+    const detailPart = currentDetail ? " " + ctx.ui.theme.fg("text", currentDetail) : "";
+    const metaPart = ctx.ui.theme.fg("dim", ` (${elapsedSec}s • <esc> to stop)`);
+    const line = `${spinner} ${actionPart}${detailPart}${metaPart}`;
 
     ctx.ui.setWidget("codex-loading", [line, ""], { placement: "above-editor" });
   }
