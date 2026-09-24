@@ -61,20 +61,16 @@ pi --no-welcome
 ### Auto Session Titles
 Listens for `agent_settled`, generates a 3 to 5 word action title based on conversation context (after 2 user messages), respects the chat language, and never overwrites manual names.
 
-## Models and Providers
+## Models
+Comes with preconfigured free OpenCode Zen models via `models.json.example`:
+- `MiMo-V2.6-Flash Free`
+- `Muse Spark 1.3 Free`
+- `Ling 3.0 Flash Fin Free`
+- `Nemotron 3.5 Lightning Free`
+- `Muse Spark 1.2 Free`
+- `Nemotron 3 Ultra Free`
 
-Preconfigured for [9router](https://github.com/flxhrdyn/9router) (`pi-9router-ext`) and local OpenAI-compatible endpoints:
-
-- **Antigravity via 9router**: connects to 9router proxy to access free Gemini models (such as `ag/gemini-3.8-flash-high`, `ag/gemini-3.8-flash-medium`, `ag/gemini-3.8-flash-low`, and Claude models).
-- **OpenCode Zen**: 6 free models configured in `models.json.example`:
-  - `MiMo-V2.6-Flash Free`
-  - `Muse Spark 1.3 Free`
-  - `Ling 3.0 Flash Fin Free`
-  - `Nemotron 3.5 Lightning Free`
-  - `Muse Spark 1.2 Free`
-  - `Nemotron 3 Ultra Free`
-
-Use `/model` inside Pi to pick models or press `ctrl+p` to cycle.
+Use `/model` inside Pi to switch models or press `ctrl+p` to cycle.
 
 ## Tests
 
