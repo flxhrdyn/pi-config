@@ -1,65 +1,57 @@
 # pi-config
 
-A minimalist, theme-agnostic customization layer for [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) — the extensible terminal AI coding agent.
+A minimalist, theme-agnostic customization layer for [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent).
 
-This repository turns the stock Pi TUI into a clean, distraction-free workspace: a centered geometric Pi logo, a live statusline footer, floating interactive dialogs, and structured workflow commands for side questions, planning, building, debugging, and review.
+This repository turns the stock Pi TUI into a clean, distraction-free workspace with a centered geometric Pi logo, a live statusline footer, floating interactive dialogs, and structured workflow commands for side questions, planning, building, debugging, and review.
 
-## What's Included
+## Features
 
-- **Centered Startup Header** — Centered 3-piece geometric Pi logo (Coral / Blue / Yellow) rendered with semantic theme tokens (`syntaxKeyword`, `syntaxFunction`, `warning`), plus a centered metadata block:
-  `[Version]`, `[Model]`, `[Directory]`, `[Shortcuts]`.
-- **Minimal Statusline Footer** — Live `NORMAL` / `BUSY` mode indicator, active model name, git branch + diff status (`~2 +1 -1`), UTF-8 label, and context window usage with smart color thresholds.
-- **Live Breadcrumbs** — Streaming working widget above the editor showing the current tool target (`Reading extensions/custom-footer.ts:1-50`, `Executing git status`) with elapsed timer and `<esc> to stop`.
-- **Floating Interactive Dialogs**:
-  - `/history` — Session switcher with auto-generated titles and relative timestamps (`31m ago`).
-  - `/stats` — Rounded floating card with model, context progress bar, turn count, tool breakdown, uptime, and workspace.
-  - `/zen` — Zen focus mode: toggles the startup header on/off.
-- **Workflow Extensions**:
-  - `/btw <question>` — Out-of-band side question (see details below).
-  - `/plan <goal>` — Read-only scouting mode with structured plan, risks, acceptance criteria, and verification commands. Mutation tools (`edit`, `write`) are automatically blocked.
-  - `/build` — Executes the saved `/plan` step-by-step with checkpointing. Refuses to run without an approved plan.
-  - `/debug <issue>` — Enforces the 5-stage systematic workflow: Reproduce → Root Cause → Hypothesis → Minimal Fix → Regression Test.
-  - `/review [target]` — Read-only code review scored by [CRITICAL] / [IMPORTANT] / [MINOR].
-- **Auto Session Titles** (`auto-session-title`) — Imperative 3–5 word session summaries (like Codex/Antigravity) generated once context exists (2+ user messages), respecting the conversation language and never overwriting manual names.
-- **Model Layer** — 6 free OpenCode Zen models via `models.json` (MiMo, Muse Spark, Ling, Nemotron), documented in the [example file](models.json.example).
-- **27 Skills** — Core superpowers (TDD, systematic debugging, review flow). Includes 12 unique skills imported from Claude Code (`clone-website-*`, `grilling`, `impeccable`, `vercel-*`, `context7-mcp`, `writing-guidelines`, `deploy-to-vercel`).
+- **Centered Startup Header**: 3-piece geometric Pi logo rendered with semantic theme tokens (`syntaxKeyword`, `syntaxFunction`, `warning`), plus a centered metadata block with `[Version]`, `[Model]`, `[Directory]`, and `[Shortcuts]`.
+- **Minimal Statusline Footer**: live `NORMAL` and `BUSY` mode indicator, active model name, git branch and diff status, UTF-8 label, and context window usage with color thresholds.
+- **Live Breadcrumbs**: working widget above the editor that shows the current tool target (for example `Reading extensions/custom-footer.ts:1-50`) with an elapsed timer.
+- **Interactive Dialogs**:
+  - `/history`: session switcher with auto-generated titles and relative timestamps (for example `31m ago`).
+  - `/stats`: floating card with model, context progress bar, turn count, tool breakdown, uptime, and workspace.
+  - `/zen`: focus mode that toggles the startup header.
+- **Workflow Commands**:
+  - `/btw <question>`: out-of-band side question answered in a popup panel without touching the main task.
+  - `/plan <goal>`: read-only scouting mode with steps, risks, acceptance criteria, and verification commands. Mutation tools (`edit`, `write`) are blocked automatically.
+  - `/build`: runs the saved `/plan` step by step with checkpointing. Refuses to run without an approved plan.
+  - `/debug <issue>`: 5-stage workflow with Reproduce, Root Cause, Hypothesis, Minimal Fix, and Regression Test.
+  - `/review [target]`: read-only code review grouped by `[CRITICAL]`, `[IMPORTANT]`, and `[MINOR]`.
+- **Auto Session Titles** (`auto-session-title`): short imperative summaries generated after enough context exists, in the conversation language, never overwriting manual names.
+- **Model Layer**: 6 free OpenCode Zen models via `models.json` (MiMo, Muse Spark, Ling, Nemotron). See `models.json.example`.
+- **27 Skills**: core workflow skills (TDD, systematic debugging, review flow) including 12 skills imported from Claude Code.
 
-## Screenshots
+## Installation
 
-Run Pi and compare your terminal against:
+Requirements:
 
-| Startup Header | Session Switcher | Stats Modal |
-|---|---|---|
-| Centered geometric Pi logo + tabular metadata | Relative timestamps, clean titles, no nerd-font glyphs | Rounded floating card with context progress bar |
+- [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) v0.87.1 or later
+- [Node.js](https://nodejs.org/) 22.19 or later
+- [Git](https://git-scm.com/)
+- Optional: an OpenAI-compatible endpoint such as [9router](https://github.com/flxhrdyn/9router) at `http://127.0.0.1:20128`
 
-> Tip: Press `ctrl+p` to cycle models, `/themes` to switch color schemes, `/stats` for a session overview.
+Steps:
 
-## Replicate This Setup
-
-### 1. Prerequisites
-- [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) v0.87.1+
-- [Node.js](https://nodejs.org/) 22.19+ and [Git](https://git-scm.com/)
-- Optional: [9router](https://github.com/flxhrdyn/9router) or any OpenAI-compatible endpoint at `http://127.0.0.1:20128`
-
-### 2. Clone Into the Pi Agent Directory
 ```bash
-# Backup your existing config first if needed
+# 1. Back up your existing config if needed
 mv ~/.pi/agent ~/.pi/agent.backup
 
-# Clone this repository
+# 2. Clone this repository
 git clone https://github.com/flxhrdyn/pi-config.git ~/.pi/agent
-```
 
-### 3. Install Extension Packages
-```bash
+# 3. Install extension packages
 cd ~/.pi/agent/npm
 npm install
 ```
 
-### 4. Configure Models & Credentials
-Secrets are intentionally **excluded** from this repository (see `.gitignore`):
+## Configuration
+
+Secrets are excluded from this repository. See `.gitignore`.
 
 1. Create `~/.pi/agent/9router-config.json`:
+
 ```json
 {
   "baseUrl": "http://127.0.0.1:20128",
@@ -68,11 +60,14 @@ Secrets are intentionally **excluded** from this repository (see `.gitignore`):
 }
 ```
 
-2. Copy the models template and fill in your API key:
+2. Copy the model template and set your API key:
+
 ```bash
 cp models.json.example models.json
 ```
-Or define your own OpenAI-compatible provider (Ollama, vLLM, 9router, OpenCode Zen, etc.):
+
+Example provider entry:
+
 ```json
 {
   "providers": {
@@ -89,46 +84,75 @@ Or define your own OpenAI-compatible provider (Ollama, vLLM, 9router, OpenCode Z
 }
 ```
 
-3. Authenticate providers: `pi` → `/login`
+3. Authenticate providers:
 
-### 5. Launch & Verify
+```bash
+pi
+```
+
+Then run `/login` inside Pi.
+
+## Usage
+
+Start Pi:
+
 ```bash
 pi --no-welcome
 ```
-Expected: centered Pi logo, tabular metadata, minimal statusline at bottom.
-Try: `/stats`, `/history`, `/model`, `/themes`, `/btw apa itu useMemo?`
 
-### 6. Run the Test Suite
+Expected result: centered Pi logo, tabular metadata, and a minimal statusline at the bottom.
+
+Useful commands:
+
+- `/stats`: show session overview
+- `/history`: switch sessions
+- `/model`: select model
+- `/themes`: switch color scheme
+- `/btw <question>`: ask a side question in a popup panel
+- `/plan <goal>` then `/build`: plan first, build after approval
+
+Tip: press `ctrl+p` to cycle models.
+
+## Testing
+
 ```bash
 cd ~/.pi/agent
 npx vitest run
 ```
 
-## What's Custom vs Stock Pi
+Typecheck an extension file:
 
-| Layer | Stock Pi | This Repo Adds |
+```bash
+npx tsx -c "~/.pi/agent/extensions/workflow-commands.ts"
+```
+
+After editing extensions inside Pi, run `/reload`.
+
+## Comparison With Stock Pi
+
+| Layer | Stock Pi | This Repo |
 |---|---|---|
-| Header | Built-in keybinding hints | 3-piece geometric Pi logo, centered metadata |
-| Footer | Default token footer | Minimal `NORMAL` / `BUSY` statusline, git stats, context gauge |
-| Loading | Generic spinner | Live breadcrumbs (`Reading …:1-50`) with timer |
-| Commands | `/model`, `/themes`, `/stats` (core) | `/history`, `/zen`, `/btw`, `/plan`, `/build`, `/debug`, `/review` |
-| Sessions | Raw first-message titles | LLM-generated imperative titles, clean session switcher |
+| Header | Built-in keybinding hints | Geometric Pi logo with centered metadata |
+| Footer | Default token footer | Minimal `NORMAL` and `BUSY` statusline with git stats and context gauge |
+| Loading | Generic spinner | Live breadcrumbs with timer |
+| Commands | `/model`, `/themes`, core commands | Adds `/history`, `/zen`, `/btw`, `/plan`, `/build`, `/debug`, `/review` |
+| Sessions | Raw first-message titles | Generated imperative titles with clean switcher |
 | Skills | None bundled | 27 curated skills with tests |
 
 ## Project Structure
 
-```
+```text
 ~/.pi/agent/
 ├── extensions/
-│   ├── auto-session-title.ts  # Codex-style auto session naming
+│   ├── auto-session-title.ts  # Auto session naming
 │   ├── custom-footer.ts       # Header, footer, widgets, /history, /stats, /zen
-│   ├── themes.ts              # /themes switcher + terminal background sync
+│   ├── themes.ts              # /themes switcher and terminal background sync
 │   └── workflow-commands.ts   # /btw, /plan, /build, /debug, /review
 ├── tests/
 │   ├── auto-session-title.test.ts
 │   └── workflow-commands.test.ts
-├── themes/                    # gruvbox, tokyo-night, dracula, catppuccin, ...
-├── skills/                    # 27 prompt skills (TDD, debugging, vercel, ...)
+├── themes/                    # gruvbox, tokyo-night, dracula, catppuccin, and others
+├── skills/                    # 27 prompt skills
 ├── npm/                       # Managed extension packages
 ├── settings.json              # quietStartup, tuiMode, editorPaddingX
 ├── models.json.example        # Copy to models.json with your own keys
@@ -137,8 +161,12 @@ npx vitest run
 
 ## Contributing
 
-Issues and pull requests are welcome. Keep additions theme-agnostic (use `theme.fg()` / `theme.bg()` tokens, never hardcoded hex in extensions), covered by a Vitest case in `tests/`, and verified with `/reload` + `npx vitest run`.
+Issues and pull requests are welcome. Please follow these rules:
+
+- Use theme tokens such as `theme.fg()` and `theme.bg()`. Do not hardcode hex colors in extensions.
+- Add or update a Vitest case under `tests/` for behavior changes.
+- Verify with `/reload` and `npx vitest run` before submitting.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
