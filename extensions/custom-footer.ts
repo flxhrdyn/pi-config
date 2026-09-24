@@ -228,10 +228,8 @@ export default function (pi: ExtensionAPI) {
       return p ? `${p}${range}` : "";
     }
     if (tool === "bash") {
-      const rawCmd = args.command || "";
-      // Ambil baris pertama saja dan buang newline agar tidak wrapping ke baris baru
-      const firstLine = rawCmd.split(/[\r\n]+/)[0]?.trim() || "";
-      return firstLine.length > 32 ? firstLine.slice(0, 29) + "…" : firstLine;
+      const cmd = args.command || "";
+      return cmd.length > 36 ? cmd.slice(0, 33) + "…" : cmd;
     }
     if (tool.includes("search") || tool === "find" || tool === "grep") {
       const q = args.query || args.pattern || "";
@@ -259,7 +257,6 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_end", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     currentAction = "Analyzing";
-    currentDetail = "";
     updateWorkingWidget(ctx);
   });
 
@@ -285,7 +282,7 @@ export default function (pi: ExtensionAPI) {
     const metaPart = ctx.ui.theme.fg("dim", ` (${elapsedSec}s • <esc> to stop)`);
     const line = `${spinner} ${actionPart}${detailPart}${metaPart}`;
 
-    ctx.ui.setWidget("codex-loading", [line], { placement: "above-editor" });
+    ctx.ui.setWidget("codex-loading", [line, ""], { placement: "above-editor" });
   }
 
   function initCleanVimUI(ctx: any) {
