@@ -617,9 +617,6 @@ export default function (pi: ExtensionAPI) {
       }, { overlay: true });
     },
   });
-      }, { overlay: true });
-    },
-  });
 
   // Command /zen: Toggle Zen mode (sembunyikan/tampilkan header dan statusline)
   pi.registerCommand("zen", {
