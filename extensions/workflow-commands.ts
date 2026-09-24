@@ -3,6 +3,33 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
+// Helper lebar teks terminal sederhana tanpa dependensi luar
+export function getVisibleWidth(str: string): number {
+  if (!str) return 0;
+  // Hapus ANSI escape sequences
+  const clean = str.replace(/\x1b\[[0-9;]*m/g, "");
+  let len = 0;
+  for (const ch of clean) {
+    const code = ch.codePointAt(0) || 0;
+    // Karakter CJK / fullwidth
+    if (
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6)
+    ) {
+      len += 2;
+    } else {
+      len += 1;
+    }
+  }
+  return len;
+}
+
 export interface WorkflowPlan {
   goal: string;
   steps: string[];
@@ -35,17 +62,22 @@ export function createWorkflowState(): WorkflowState {
   };
 }
 
-export function formatBtwPrompt(question: string): string {
-  return [
-    `[BY-THE-WAY SIDE QUESTION]`,
-    `Question: "${question}"`,
-    ``,
-    `IMPORTANT RULES FOR THIS RESPONSE:`,
-    `1. This is a side question. Do NOT modify, reset, or abandon the current active plan, goal, or task.`,
-    `2. Provide a direct, concise, and accurate answer to the side question.`,
-    `3. Do NOT save this answer into project memory, persistent checkpoints, or active plans.`,
-    `4. Conclude your response with a 1-line note confirming that the main task context remains unchanged.`,
-  ].join("\n");
+export function wrapText(text: string, maxW: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    if (!cur) {
+      cur = w;
+    } else if (getVisibleWidth(cur + " " + w) <= maxW) {
+      cur += " " + w;
+    } else {
+      lines.push(cur);
+      cur = w;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
 }
 
 export function formatPlanPrompt(goal: string): string {
@@ -115,6 +147,66 @@ export function formatReviewPrompt(targetContext?: string): string {
   ].join("\n");
 }
 
+// Panggil model ringan secara detached untuk menjawab pertanyaan sampingan tanpa mencemari riwayat utama
+export async function queryBtwAnswer(question: string, contextSummary: string): Promise<string> {
+  const configPath = path.join(os.homedir(), ".pi", "agent", "9router-config.json");
+  if (!fs.existsSync(configPath)) {
+    return "Layanan AI lokal belum terkonfigurasi di 9router-config.json.";
+  }
+
+  let cfg: { baseUrl?: string; apiKey?: string } = {};
+  try {
+    cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch {
+    return "Gagal membaca konfigurasi 9router.";
+  }
+
+  const baseUrl = cfg.baseUrl || "http://127.0.0.1:20128";
+  const apiKey = cfg.apiKey || "";
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+
+  const prompt = [
+    `Context of current work: "${contextSummary.slice(0, 300)}"`,
+    `User side question: "${question}"`,
+    ``,
+    `Instructions:`,
+    `- Answer the side question directly, concisely, and accurately in 1 to 3 short paragraphs.`,
+    `- Match the language of the user's question.`,
+    `- Do NOT include greetings or filler. Output only the clear explanation.`,
+  ].join("\n");
+
+  try {
+    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "ag/gemini-3.8-flash-low",
+        stream: false,
+        max_tokens: 300,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+    if (!res.ok) {
+      return `Gagal memanggil model sampingan (${res.status} ${res.statusText}).`;
+    }
+
+    const data: any = await res.json();
+    const content = data.choices?.[0]?.message?.content;
+    return typeof content === "string" ? content.trim() : "Tidak ada respon dari model.";
+  } catch (err: any) {
+    clearTimeout(timer);
+    return `Koneksi timeout atau gagal: ${err.message || String(err)}`;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   const state = createWorkflowState();
 
@@ -150,42 +242,94 @@ export default function (pi: ExtensionAPI) {
     return null;
   }
 
-  // Intercept input: Jika streaming sedang aktif dan user mengirim /btw, antrekan dengan aman
-  pi.on("input", async (event) => {
+  // Helper menampilkan popup modal dialog /btw (persis seperti /model box)
+  async function showBtwModal(ctx: any, question: string, answerText: string) {
+    if (!ctx.ui?.custom) return;
+
+    await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
+      return {
+        dispose() {},
+        invalidate() {},
+        handleInput(data: string) {
+          // Tutup saat user menekan ESC, Enter, atau q
+          if (data === "\x1b" || data === "\r" || data === "\n" || data === "q" || data === "Q") {
+            done();
+            return true;
+          }
+          return true;
+        },
+        render(width: number): string[] {
+          const maxBoxWidth = Math.min(width - 4, 76);
+          const innerW = maxBoxWidth - 4;
+
+          const qLines = wrapText(`Q: ${question}`, innerW);
+          const aLines = wrapText(answerText, innerW);
+
+          const borderCol = (s: string) => theme.fg("borderAccent", s);
+          const padLine = (content: string, rawLen: number) => {
+            const gap = Math.max(0, innerW - rawLen);
+            return `${borderCol("│")}  ${content}${" ".repeat(gap)}${borderCol("│")}`;
+          };
+
+          const titleText = theme.bold(theme.fg("accent", "BY-THE-WAY SIDE QUESTION"));
+          const titleLen = getVisibleWidth("BY-THE-WAY SIDE QUESTION");
+
+          const box: string[] = [
+            borderCol("╭" + "─".repeat(innerW + 2) + "╮"),
+            padLine(titleText, titleLen),
+            borderCol("├" + "─".repeat(innerW + 2) + "┤"),
+          ];
+
+          for (const q of qLines) {
+            box.push(padLine(theme.fg("warning", q), getVisibleWidth(q)));
+          }
+
+          box.push(borderCol("├" + "─".repeat(innerW + 2) + "┤"));
+
+          for (const a of aLines) {
+            box.push(padLine(theme.fg("text", a), getVisibleWidth(a)));
+          }
+
+          box.push(borderCol("├" + "─".repeat(innerW + 2) + "┤"));
+          const hint = theme.fg("dim", "Press ESC, ENTER, or Q to close (main task runs untouched)");
+          box.push(padLine(hint, getVisibleWidth("Press ESC, ENTER, or Q to close (main task runs untouched)")));
+          box.push(borderCol("╰" + "─".repeat(innerW + 2) + "╯"));
+
+          const padLeft = Math.max(1, Math.floor((width - (innerW + 4)) / 2));
+          const pad = " ".repeat(padLeft);
+          return ["", ...box.map((l) => pad + l), ""];
+        },
+      };
+    }, { overlay: true });
+  }
+
+  // Intercept input: Jika streaming sedang aktif dan user mengetik /btw, jalankan query out-of-band paralel
+  pi.on("input", async (event, ctx) => {
     const trimmed = event.text.trim();
     if (!trimmed.startsWith("/btw ")) return { action: "continue" };
 
-    // Jika input tiba saat ada turn streaming/running
-    if (event.streamingBehavior !== undefined) {
-      const question = trimmed.slice(5).trim();
-      if (question) {
-        state.btwQueue.push({
-          id: Math.random().toString(36).slice(2, 9),
-          question,
-          queuedAt: new Date().toISOString(),
-        });
-        return { action: "handled" };
-      }
-    }
-    return { action: "continue" };
-  });
+    const question = trimmed.slice(5).trim();
+    if (!question) return { action: "handled" };
 
-  // Proses antrean /btw setelah turn utama selesai
-  pi.on("agent_end", async (_event, ctx) => {
-    // Reset mode jika bukan build
-    if (state.activeMode === "plan" || state.activeMode === "review") {
-      state.activeMode = "idle";
-    }
+    // Ambil cuplikan konteks percakapan terakhir
+    let contextSummary = "";
+    try {
+      const entries = (ctx.sessionManager?.getEntries?.() || []) as any[];
+      const recent = entries.slice(-6);
+      contextSummary = recent
+        .filter((e) => e.type === "message" && e.message?.content)
+        .map((e) => `${e.message.role}: ${JSON.stringify(e.message.content).slice(0, 100)}`)
+        .join("\n");
+    } catch {}
 
-    if (state.btwQueue.length > 0 && !state.isProcessingBtw) {
-      state.isProcessingBtw = true;
-      const nextItem = state.btwQueue.shift();
-      if (nextItem) {
-        ctx.ui?.notify?.(`Memproses pertanyaan sampingan antrean: "${nextItem.question.slice(0, 30)}..."`, "info");
-        pi.sendUserMessage(formatBtwPrompt(nextItem.question), { deliverAs: "followUp" });
-      }
-      state.isProcessingBtw = false;
-    }
+    // Jalankan secara paralel di background tanpa memblokir atau menahan streaming turn utama
+    queueMicrotask(async () => {
+      ctx.ui?.notify?.(`[BTW] Menjawab pertanyaan sampingan di background...`, "info");
+      const answer = await queryBtwAnswer(question, contextSummary);
+      await showBtwModal(ctx, question, answer);
+    });
+
+    return { action: "handled" };
   });
 
   // Enforce read-only di mode /plan dan /review
@@ -201,9 +345,9 @@ export default function (pi: ExtensionAPI) {
     return {};
   });
 
-  // 1. Command /btw
+  // 1. Command /btw (bila dipanggil saat idle)
   pi.registerCommand("btw", {
-    description: "Ajukan pertanyaan sampingan tanpa mengubah goal atau active workflow",
+    description: "Ajukan pertanyaan sampingan tanpa mengubah goal atau active workflow (Out-of-band box)",
     handler: async (args, ctx) => {
       const question = args.trim();
       if (!question) {
@@ -211,41 +355,36 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Jika agent sedang sibuk dan ctx.isIdle bernilai false, antrekan
-      if (ctx.isIdle && !ctx.isIdle()) {
-        state.btwQueue.push({
-          id: Math.random().toString(36).slice(2, 9),
-          question,
-          queuedAt: new Date().toISOString(),
-        });
-        ctx.ui?.notify?.("Sesi sedang aktif. Pertanyaan /btw telah dimasukkan ke antrean dan akan dijawab setelah turn selesai.", "info");
-        return;
-      }
+      let contextSummary = "";
+      try {
+        const entries = (ctx.sessionManager?.getEntries?.() || []) as any[];
+        const recent = entries.slice(-6);
+        contextSummary = recent
+          .filter((e) => e.type === "message" && e.message?.content)
+          .map((e) => `${e.message.role}: ${JSON.stringify(e.message.content).slice(0, 100)}`)
+          .join("\n");
+      } catch {}
 
-      pi.sendUserMessage(formatBtwPrompt(question));
+      ctx.ui?.notify?.(`[BTW] Memproses pertanyaan sampingan...`, "info");
+      const answer = await queryBtwAnswer(question, contextSummary);
+      await showBtwModal(ctx, question, answer);
     },
   });
 
   // Command /btw-list
   pi.registerCommand("btw-list", {
-    description: "Lihat daftar antrean pertanyaan sampingan /btw yang menunggu",
+    description: "Lihat status fitur pertanyaan sampingan /btw",
     handler: async (_args, ctx) => {
-      if (state.btwQueue.length === 0) {
-        ctx.ui?.notify?.("Antrean /btw kosong.", "info");
-        return;
-      }
-      const list = state.btwQueue.map((item, idx) => `${idx + 1}. ${item.question}`).join("\n");
-      ctx.ui?.notify?.(`Antrean /btw (${state.btwQueue.length}):\n${list}`, "info");
+      ctx.ui?.notify?.("Mekanisme /btw aktif dalam mode Out-of-band (muncul sebagai box popup tanpa memblokir task).", "info");
     },
   });
 
   // Command /btw-clear
   pi.registerCommand("btw-clear", {
-    description: "Bersihkan seluruh antrean pertanyaan sampingan /btw",
+    description: "Reset status / antrean /btw",
     handler: async (_args, ctx) => {
-      const count = state.btwQueue.length;
       state.btwQueue = [];
-      ctx.ui?.notify?.(`Dibersihkan ${count} antrean /btw.`, "info");
+      ctx.ui?.notify?.("Antrean / status /btw bersih.", "info");
     },
   });
 
@@ -261,7 +400,6 @@ export default function (pi: ExtensionAPI) {
 
       state.activeMode = "plan";
 
-      // Inisialisasi draft plan
       const draftPlan: WorkflowPlan = {
         goal,
         steps: ["Scout codebase", "Detailing architecture", "Implement changes", "Verify"],

@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import workflowExtension, {
-  formatBtwPrompt,
   formatPlanPrompt,
   formatBuildPrompt,
   formatDebugPrompt,
   formatReviewPrompt,
+  wrapText,
   createWorkflowState,
 } from "../extensions/workflow-commands.js";
 
@@ -13,7 +13,7 @@ describe("workflow-commands extension tests", () => {
   let eventHandlers: Record<string, Function>;
   let sentMessages: Array<{ content: string; options?: any }>;
   let appendedEntries: Array<{ customType: string; data: any }>;
-  let mockUi: { notify: ReturnType<typeof vi.fn> };
+  let mockUi: { notify: ReturnType<typeof vi.fn>; custom: ReturnType<typeof vi.fn> };
   let mockPi: any;
 
   beforeEach(() => {
@@ -21,7 +21,7 @@ describe("workflow-commands extension tests", () => {
     eventHandlers = {};
     sentMessages = [];
     appendedEntries = [];
-    mockUi = { notify: vi.fn() };
+    mockUi = { notify: vi.fn(), custom: vi.fn() };
 
     mockPi = {
       registerCommand: vi.fn((name: string, def: any) => {
@@ -50,69 +50,46 @@ describe("workflow-commands extension tests", () => {
     expect(commands["review"]).toBeDefined();
   });
 
-  describe("/btw side questions", () => {
-    it("formats /btw prompt properly without altering the main task", () => {
-      const prompt = formatBtwPrompt("apa perbedaan npm run dan npx?");
-      expect(prompt).toContain("BY-THE-WAY SIDE QUESTION");
-      expect(prompt).toContain("apa perbedaan npm run dan npx?");
-      expect(prompt).toContain("Do NOT modify, reset, or abandon the current active plan");
-      expect(prompt).toContain("main task context remains unchanged");
+  describe("/btw side questions (Out-of-band box popup)", () => {
+    it("wraps text nicely for box modal rendering", () => {
+      const wrapped = wrapText("Satu dua tiga empat lima enam", 15);
+      expect(wrapped.length).toBeGreaterThan(1);
     });
 
-    it("sends /btw message immediately when agent is idle", async () => {
+    it("handles /btw during streaming via event input and opens custom modal without injecting to main chat", async () => {
       workflowExtension(mockPi);
-      const ctx: any = { isIdle: () => true, ui: mockUi };
-      await commands["btw"]("pertanyaan santai", ctx);
+      const ctx: any = {
+        ui: mockUi,
+        sessionManager: {
+          getEntries: () => [
+            { type: "message", message: { role: "user", content: [{ type: "text", text: "buatkan website" }] } },
+          ],
+        },
+      };
 
-      expect(sentMessages.length).toBe(1);
-      expect(sentMessages[0].content).toContain("pertanyaan santai");
-    });
-
-    it("queues /btw safely when agent is busy (isIdle=false)", async () => {
-      workflowExtension(mockPi);
-      const ctx: any = { isIdle: () => false, ui: mockUi };
-      await commands["btw"]("pertanyaan saat sibuk", ctx);
-
-      // Tidak langsung dikirim ke model
-      expect(sentMessages.length).toBe(0);
-      expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("antrean"),
-        "info"
+      const res = await eventHandlers["input"](
+        { text: "/btw apa itu vue?", source: "user" },
+        ctx
       );
 
-      // Cek antrean via /btw-list
-      await commands["btw-list"]("", ctx);
-      expect(mockUi.notify).toHaveBeenCalledWith(
-        expect.stringContaining("pertanyaan saat sibuk"),
-        "info"
-      );
-
-      // Saat turn selesai (agent_end), pertanyaan antrean diproses
-      await eventHandlers["agent_end"]({}, ctx);
-      expect(sentMessages.length).toBe(1);
-      expect(sentMessages[0].content).toContain("pertanyaan saat sibuk");
-      expect(sentMessages[0].options?.deliverAs).toBe("followUp");
-    });
-
-    it("clears queue via /btw-clear", async () => {
-      workflowExtension(mockPi);
-      const ctx: any = { isIdle: () => false, ui: mockUi };
-      await commands["btw"]("q1", ctx);
-      await commands["btw-clear"]("", ctx);
-
-      await commands["btw-list"]("", ctx);
-      expect(mockUi.notify).toHaveBeenCalledWith("Antrean /btw kosong.", "info");
-    });
-
-    it("intercepts /btw input during streaming and marks as handled", async () => {
-      workflowExtension(mockPi);
-      const res = await eventHandlers["input"]({
-        text: "/btw pertanyaan di tengah streaming",
-        source: "user",
-        streamingBehavior: "steer",
-      });
-
+      // Input di-handle sehingga tidak masuk ke giliran prompt chat utama
       expect(res.action).toBe("handled");
+      // Main messages tidak tercemar
+      expect(sentMessages.length).toBe(0);
+    });
+
+    it("opens popup modal when /btw is executed directly while idle", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        ui: mockUi,
+        sessionManager: { getEntries: () => [] },
+      };
+
+      await commands["btw"]("apa bedanya git merge dan rebase?", ctx);
+      // Membuka modal box via ctx.ui.custom
+      expect(mockUi.custom).toHaveBeenCalled();
+      // Main messages tidak tercemar
+      expect(sentMessages.length).toBe(0);
     });
   });
 
