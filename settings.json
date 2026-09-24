@@ -2,7 +2,9 @@
   "theme": "gruvbox",
   "packages": [
     "npm:pi-9router-ext",
-    "npm:pi-sub-agent"
+    "npm:pi-subagents",
+    "npm:pi-web-access",
+    "npm:pi-goal-x"
   ],
   "editorPaddingX": 1,
   "tuiMode": "fullscreen",
