@@ -12,4 +12,5 @@ sessions/
 # Binaries, releases & node dependencies
 bin/
 install/
+node_modules/
 npm/node_modules/
