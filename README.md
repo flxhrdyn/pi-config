@@ -1,17 +1,17 @@
 # pi-config
 
-A Neovim-inspired, theme-agnostic customization layer for [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) — the extensible terminal AI coding agent.
+A minimalist, theme-agnostic customization layer for [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) — the extensible terminal AI coding agent.
 
-This repository turns the stock Pi TUI into a minimalist, Vim-style workspace: a centered geometric Pi logo, a live statusline footer, Telescope-style interactive dialogs, and structured workflow commands for side questions, planning, building, debugging, and review.
+This repository turns the stock Pi TUI into a clean, distraction-free workspace: a centered geometric Pi logo, a live statusline footer, floating interactive dialogs, and structured workflow commands for side questions, planning, building, debugging, and review.
 
 ## What's Included
 
-- **Neovim-Style Startup Header** — Centered 3-piece geometric Pi logo (Coral / Blue / Yellow) rendered with semantic theme tokens (`syntaxKeyword`, `syntaxFunction`, `warning`), plus a centered metadata block:
+- **Centered Startup Header** — Centered 3-piece geometric Pi logo (Coral / Blue / Yellow) rendered with semantic theme tokens (`syntaxKeyword`, `syntaxFunction`, `warning`), plus a centered metadata block:
   `[Version]`, `[Model]`, `[Directory]`, `[Shortcuts]`.
-- **Vim Statusline Footer** — Live `NORMAL` / `BUSY` mode indicator, active model name, git branch + diff status (`~2 +1 -1`), UTF-8 label, and context window usage with smart color thresholds.
+- **Minimal Statusline Footer** — Live `NORMAL` / `BUSY` mode indicator, active model name, git branch + diff status (`~2 +1 -1`), UTF-8 label, and context window usage with smart color thresholds.
 - **Live Breadcrumbs** — Streaming working widget above the editor showing the current tool target (`Reading extensions/custom-footer.ts:1-50`, `Executing git status`) with elapsed timer and `<esc> to stop`.
-- **Floating Telescope Dialogs**:
-  - `/history` — Neovim Telescope session switcher with auto-generated titles and relative timestamps (`31m ago`).
+- **Floating Interactive Dialogs**:
+  - `/history` — Session switcher with auto-generated titles and relative timestamps (`31m ago`).
   - `/stats` — Rounded floating card with model, context progress bar, turn count, tool breakdown, uptime, and workspace.
   - `/zen` — Zen focus mode: toggles the startup header on/off.
 - **Workflow Extensions**:
@@ -95,7 +95,7 @@ Or define your own OpenAI-compatible provider (Ollama, vLLM, 9router, OpenCode Z
 ```bash
 pi --no-welcome
 ```
-Expected: centered Pi logo, tabular metadata, Vim statusline at bottom.
+Expected: centered Pi logo, tabular metadata, minimal statusline at bottom.
 Try: `/stats`, `/history`, `/model`, `/themes`, `/btw apa itu useMemo?`
 
 ### 6. Run the Test Suite
@@ -109,10 +109,10 @@ npx vitest run
 | Layer | Stock Pi | This Repo Adds |
 |---|---|---|
 | Header | Built-in keybinding hints | 3-piece geometric Pi logo, centered metadata |
-| Footer | Default token footer | Vim `NORMAL` / `BUSY` statusline, git stats, context gauge |
+| Footer | Default token footer | Minimal `NORMAL` / `BUSY` statusline, git stats, context gauge |
 | Loading | Generic spinner | Live breadcrumbs (`Reading …:1-50`) with timer |
 | Commands | `/model`, `/themes`, `/stats` (core) | `/history`, `/zen`, `/btw`, `/plan`, `/build`, `/debug`, `/review` |
-| Sessions | Raw first-message titles | LLM-generated imperative titles, Telescope switcher |
+| Sessions | Raw first-message titles | LLM-generated imperative titles, clean session switcher |
 | Skills | None bundled | 27 curated skills with tests |
 
 ## Project Structure
