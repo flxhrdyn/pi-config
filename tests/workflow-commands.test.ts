@@ -194,6 +194,8 @@ describe("workflow-commands hardened extension tests", () => {
         cwd: testCwd,
         goal: "Refactor auth",
         status: "draft",
+        planCaptured: false,
+        contentSource: "draft_placeholder",
         steps: ["Step 1"],
         risks: ["Risk 1"],
         acceptanceCriteria: ["Criteria 1"],
@@ -211,6 +213,8 @@ describe("workflow-commands hardened extension tests", () => {
         cwd: testCwd,
         goal: "Build cache system",
         status: "draft",
+        planCaptured: true,
+        contentSource: "agent",
         steps: ["Setup cache", "Add tests"],
         risks: ["Memory leak"],
         acceptanceCriteria: ["Tests pass"],
@@ -244,6 +248,8 @@ describe("workflow-commands hardened extension tests", () => {
         cwd: path.resolve(testCwd),
         goal: "Build feature",
         status: "approved",
+        planCaptured: true,
+        contentSource: "agent",
         steps: ["Step 1"],
         risks: [],
         acceptanceCriteria: [],
@@ -259,17 +265,67 @@ describe("workflow-commands hardened extension tests", () => {
       expect(loaded.diagnostic).toContain("dibuat pada sesi lain");
     });
 
+    it("/plan approve rejects if real plan has not been captured from agent output", async () => {
+      workflowExtension(mockPi);
+      const ctx: any = {
+        cwd: testCwd,
+        ui: mockUi,
+        sessionManager: { getSessionId: () => "sess-placeholder-test" },
+      };
+
+      await commands["plan"]("Implement OAuth", ctx);
+
+      // Attempting to approve before agent outputs a real plan must be rejected
+      await commands["plan"]("approve", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("Rencana nyata belum berhasil diekstrak"),
+        "warning"
+      );
+
+      // /build must also reject
+      await commands["build"]("", ctx);
+      expect(mockUi.notify).toHaveBeenCalledWith(
+        expect.stringContaining("belum memiliki langkah nyata"),
+        "error"
+      );
+    });
+
     it("/build strictly rejects plans that are still in 'draft' status until approved", async () => {
       workflowExtension(mockPi);
       const ctx: any = {
         cwd: testCwd,
         ui: mockUi,
-        sessionManager: { getSessionId: () => "sess-draft-build" },
+        sessionManager: {
+          getSessionId: () => "sess-draft-build",
+          getEntries: () => [
+            {
+              type: "message",
+              message: {
+                role: "assistant",
+                content: [
+                  {
+                    type: "text",
+                    text: "```json\n" + JSON.stringify({
+                      plan: {
+                        steps: ["Setup OAuth client", "Add callback endpoint"],
+                        risks: ["Token leakage"],
+                        acceptanceCriteria: ["Login returns 200"],
+                        verificationCommands: ["npm test"],
+                      },
+                    }) + "\n```",
+                  },
+                ],
+              },
+            },
+          ],
+        },
       };
 
       await commands["plan"]("Implement OAuth", ctx);
+      // Simulate assistant finishing plan analysis
+      await eventHandlers["agent_settled"]({}, ctx);
 
-      // /build must reject draft
+      // /build must reject draft even if captured, because not yet approved
       await commands["build"]("", ctx);
       expect(sentMessages.length).toBe(1); // Only the /plan message, /build did NOT trigger
       expect(mockUi.notify).toHaveBeenCalledWith(

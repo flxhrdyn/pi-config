@@ -17,12 +17,16 @@ export type WorkflowMode = "idle" | "plan" | "build" | "debug" | "review";
 
 export type PlanStatus = "draft" | "approved" | "running" | "completed" | "failed";
 
+export type PlanContentSource = "agent" | "draft_placeholder";
+
 export interface WorkflowPlanV1 {
   schemaVersion: 1;
   sessionId: string;
   cwd: string;
   goal: string;
   status: PlanStatus;
+  planCaptured: boolean;
+  contentSource: PlanContentSource;
   steps: string[];
   risks: string[];
   acceptanceCriteria: string[];
@@ -174,6 +178,14 @@ export function validatePlanSchema(data: unknown): { valid: true; plan: Workflow
     return { valid: false, error: `Field 'status' tidak valid: '${String(obj.status)}'` };
   }
 
+  if (typeof obj.planCaptured !== "boolean") {
+    return { valid: false, error: "Field 'planCaptured' wajib berupa boolean" };
+  }
+  const validSources: PlanContentSource[] = ["agent", "draft_placeholder"];
+  if (typeof obj.contentSource !== "string" || !validSources.includes(obj.contentSource as PlanContentSource)) {
+    return { valid: false, error: `Field 'contentSource' tidak valid: '${String(obj.contentSource)}'` };
+  }
+
   if (!Array.isArray(obj.steps)) {
     return { valid: false, error: "Field 'steps' wajib berupa array string" };
   }
@@ -199,6 +211,8 @@ export function validatePlanSchema(data: unknown): { valid: true; plan: Workflow
     cwd: obj.cwd,
     goal: obj.goal,
     status: obj.status as PlanStatus,
+    planCaptured: obj.planCaptured,
+    contentSource: obj.contentSource as PlanContentSource,
     steps: obj.steps.map(String),
     risks: obj.risks.map(String),
     acceptanceCriteria: obj.acceptanceCriteria.map(String),
@@ -814,11 +828,13 @@ export default function (pi: ExtensionAPI) {
             }
 
             const parsed = parseStructuredPlanFromAssistantText(text);
-            if (parsed && state.currentPlan) {
-              state.currentPlan.steps = parsed.steps || state.currentPlan.steps;
-              state.currentPlan.risks = parsed.risks || state.currentPlan.risks;
-              state.currentPlan.acceptanceCriteria = parsed.acceptanceCriteria || state.currentPlan.acceptanceCriteria;
-              state.currentPlan.verificationCommands = parsed.verificationCommands || state.currentPlan.verificationCommands;
+            if (parsed && parsed.steps && parsed.steps.length > 0 && state.currentPlan) {
+              state.currentPlan.steps = parsed.steps;
+              state.currentPlan.risks = parsed.risks || [];
+              state.currentPlan.acceptanceCriteria = parsed.acceptanceCriteria || [];
+              state.currentPlan.verificationCommands = parsed.verificationCommands || ["npm test"];
+              state.currentPlan.planCaptured = true;
+              state.currentPlan.contentSource = "agent";
               state.currentPlan.updatedAt = new Date().toISOString();
 
               savePlanAtomic(ctx.cwd, state.currentPlan);
@@ -922,6 +938,14 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
+        if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
+          ctx.ui?.notify(
+            "Rencana nyata belum berhasil diekstrak dari analisis asisten (masih berstatus draft placeholder). Tunggu asisten selesai menganalisis atau pastikan respon memuat langkah terstruktur sebelum menyetujui.",
+            "warning"
+          );
+          return;
+        }
+
         plan.status = "approved";
         plan.updatedAt = new Date().toISOString();
         state.currentPlan = plan;
@@ -951,9 +975,11 @@ export default function (pi: ExtensionAPI) {
         cwd: path.resolve(ctx.cwd),
         goal: trimmed,
         status: "draft",
-        steps: ["Scouting codebase & architecture", "Detailing modules", "Implementation", "Verification"],
-        risks: ["Identifikasi risiko berjalan..."],
-        acceptanceCriteria: ["Kriteria penerimaan berjalan..."],
+        planCaptured: false,
+        contentSource: "draft_placeholder",
+        steps: [],
+        risks: [],
+        acceptanceCriteria: [],
         verificationCommands: ["npm test"],
         createdAt: now,
         updatedAt: now,
@@ -977,6 +1003,14 @@ export default function (pi: ExtensionAPI) {
       const { plan, diagnostic } = loadPlanValidated(ctx.cwd, sessionId);
       if (diagnostic || !plan) {
         ctx.ui?.notify(diagnostic || "Belum ada rencana aktif. Silakan buat rencana via /plan <tujuan>.", "warning");
+        return;
+      }
+
+      if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
+        ctx.ui?.notify(
+          "Rencana nyata belum berhasil diekstrak dari analisis asisten (masih berstatus draft placeholder). Tunggu asisten selesai menganalisis atau pastikan respon memuat langkah terstruktur sebelum menyetujui.",
+          "warning"
+        );
         return;
       }
 
@@ -1005,6 +1039,14 @@ export default function (pi: ExtensionAPI) {
       const { plan, diagnostic } = loadPlanValidated(ctx.cwd, sessionId);
       if (diagnostic || !plan) {
         ctx.ui?.notify(diagnostic || "Belum ada rencana aktif. Silakan buat rencana terlebih dahulu dengan: /plan <tujuan>", "error");
+        return;
+      }
+
+      if (!plan.planCaptured || plan.contentSource !== "agent" || plan.steps.length === 0) {
+        ctx.ui?.notify(
+          `Rencana '${plan.goal}' belum memiliki langkah nyata yang diekstrak dari asisten. Silakan buat rencana baru atau tunggu analisis selesai via /plan.`,
+          "error"
+        );
         return;
       }
 
