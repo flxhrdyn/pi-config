@@ -634,4 +634,105 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  // Command /history: Floating interactive session selector ala Telescope
+  pi.registerCommand("history", {
+    description: "Pilih dan lanjutkan sesi chat sebelumnya (Telescope session switcher)",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+
+      const sessionsDir = path.join(os.homedir(), ".pi", "agent", "sessions");
+      if (!fs.existsSync(sessionsDir)) {
+        ctx.ui.notify("Folder sesi tidak ditemukan", "warning");
+        return;
+      }
+
+      // Kumpulkan semua file session jsonl dari semua subfolder
+      const sessionList: Array<{
+        path: string;
+        filename: string;
+        time: Date;
+        preview: string;
+        sizeKb: string;
+      }> = [];
+
+      try {
+        const traverseDirs = (dir: string) => {
+          for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = path.join(dir, item.name);
+            if (item.isDirectory()) {
+              traverseDirs(fullPath);
+            } else if (item.isFile() && item.name.endsWith(".jsonl")) {
+              const stat = fs.statSync(fullPath);
+              let preview = "";
+
+              // Baca baris pertama untuk mengambil judul atau pesan pertama
+              try {
+                const head = fs.readFileSync(fullPath, "utf8").slice(0, 4000);
+                for (const line of head.split("\n")) {
+                  if (!line) continue;
+                  const obj = JSON.parse(line);
+                  if (obj.type === "session_info" && obj.name) {
+                    preview = obj.name;
+                    break;
+                  }
+                  if (obj.type === "message" && obj.message?.role === "user") {
+                    const txt = obj.message.content?.find?.((c: any) => c.type === "text")?.text;
+                    if (txt) {
+                      preview = txt.replace(/\s+/g, " ").trim().slice(0, 45);
+                      break;
+                    }
+                  }
+                }
+              } catch {}
+
+              sessionList.push({
+                path: fullPath,
+                filename: item.name,
+                time: stat.mtime,
+                preview: preview || "Untitled session",
+                sizeKb: (stat.size / 1024).toFixed(0) + "KB",
+              });
+            }
+          }
+        };
+
+        traverseDirs(sessionsDir);
+        sessionList.sort((a, b) => b.time.getTime() - a.time.getTime());
+      } catch (err) {
+        ctx.ui.notify(`Gagal membaca daftar sesi: ${err}`, "error");
+        return;
+      }
+
+      if (sessionList.length === 0) {
+        ctx.ui.notify("Belum ada riwayat sesi tersimpan", "info");
+        return;
+      }
+
+      // Format opsi untuk SelectList
+      const options = sessionList.map((s) => {
+        const timeStr = s.time.toLocaleDateString("id-ID", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        return `${timeStr.padEnd(16)} │ ${s.preview.padEnd(46)} │ ${s.sizeKb}`;
+      });
+
+      const selected = await ctx.ui.select("  󰊠 RESUME SESSION (Telescope History)  ", options);
+      if (!selected) return;
+
+      const idx = options.indexOf(selected);
+      if (idx !== -1) {
+        const chosen = sessionList[idx];
+        if (ctx.switchSession) {
+          ctx.ui.notify(`Beralih ke sesi: ${chosen.preview}`, "info");
+          await ctx.switchSession(chosen.path);
+        } else {
+          ctx.ui.notify("switchSession tidak didukung di context saat ini", "warning");
+        }
+      }
+    },
+  });
 }
