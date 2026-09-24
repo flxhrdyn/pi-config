@@ -120,14 +120,23 @@ export default function (pi: ExtensionAPI) {
 
   const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-  pi.on("session_start", async (_event, ctx) => {
+  const ensureCustomUI = (ctx: any) => {
     if (!ctx.hasUI) return;
     initCleanVimUI(ctx);
-    initCustomHeader(ctx);
+    if (!zenMode) {
+      initCustomHeader(ctx);
+    }
+  };
+
+  pi.on("session_start", async (_event, ctx) => {
+    ensureCustomUI(ctx);
+    // Jalankan juga di tick berikutnya untuk menimpa resetExtensionUI bawaan Pi saat /reload
+    setTimeout(() => ensureCustomUI(ctx), 50);
   });
 
   pi.on("agent_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
+    ensureCustomUI(ctx);
     startTime = Date.now();
     frameIdx = 0;
     currentAction = "Thinking";
