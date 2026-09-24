@@ -1,6 +1,6 @@
 # pi-config
 
-Personal configuration and extensions for [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent).
+Personal configuration and extensions for [Pi Coding Agent](https://pi.dev/).
 
 Includes a clean startup header with geometric Pi logo, minimal statusline, out-of-band side questions, structured workflow commands, and auto session titles.
 
