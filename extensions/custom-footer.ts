@@ -486,7 +486,41 @@ export default function (pi: ExtensionAPI) {
         }
       } catch {}
 
-      const toolsSummary = Object.entries(toolCounts)
+      // Hitung historis langsung dari sessionManager agar akurat mencakup seluruh sesi
+      let sessionToolCalls = totalToolsExecuted;
+      let sessionTurns = totalTurnCount;
+      const combinedToolCounts: Record<string, number> = { ...toolCounts };
+
+      try {
+        const entries = (ctx.sessionManager?.getEntries?.() || []) as any[];
+        let entryToolCalls = 0;
+        let entryUserMessages = 0;
+        const entryToolMap: Record<string, number> = {};
+
+        for (const entry of entries) {
+          if (entry.type === "message") {
+            if (entry.message?.role === "user") {
+              entryUserMessages++;
+            } else if (entry.message?.role === "assistant") {
+              const calls = entry.message.content?.filter((c: any) => c.type === "toolCall") || [];
+              for (const call of calls) {
+                entryToolCalls++;
+                entryToolMap[call.name] = (entryToolMap[call.name] || 0) + 1;
+              }
+            }
+          }
+        }
+
+        if (entryToolCalls > sessionToolCalls) {
+          sessionToolCalls = entryToolCalls;
+          Object.assign(combinedToolCounts, entryToolMap);
+        }
+        if (entryUserMessages > sessionTurns) {
+          sessionTurns = entryUserMessages;
+        }
+      } catch {}
+
+      const toolsSummary = Object.entries(combinedToolCounts)
         .sort((a, b) => b[1] - a[1])
         .map(([t, count]) => `${t}: ${count}`)
         .join(", ");
@@ -497,8 +531,8 @@ export default function (pi: ExtensionAPI) {
         "├────────────────────────────────────────────────────────┤",
         `│  Model          : ${modelName}${thinking}`.padEnd(57) + "│",
         `│  Context Usage  : ${tokenUsage}`.padEnd(57) + "│",
-        `│  Turns Active   : ${totalTurnCount} turn(s)`.padEnd(57) + "│",
-        `│  Tool Calls     : ${totalToolsExecuted} total (${toolsSummary || "none"})`.padEnd(57) + "│",
+        `│  Turns Active   : ${sessionTurns} turn(s)`.padEnd(57) + "│",
+        `│  Tool Calls     : ${sessionToolCalls} total (${toolsSummary || "none"})`.padEnd(57) + "│",
         `│  Session Uptime : ${uptimeStr}`.padEnd(57) + "│",
         `│  Working Dir    : ${process.cwd().replace(/\\/g, "/")}`.padEnd(57) + "│",
         "├────────────────────────────────────────────────────────┤",
