@@ -62,7 +62,7 @@
     "toolPendingBg": "bg0_h",
     "toolSuccessBg": "bg0_s",
     "toolErrorBg": "#322323",
-    "toolTitle": "syntaxFunction",
+    "toolTitle": "green",
     "toolOutput": "fg1",
     "toolDiffAdded": "green",
     "toolDiffRemoved": "red",
