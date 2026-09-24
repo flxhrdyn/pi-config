@@ -666,40 +666,43 @@ export default function (pi: ExtensionAPI) {
               const stat = fs.statSync(fullPath);
               let preview = "";
 
-              // Baca isi file untuk mengambil judul atau pesan pertama yang bermakna
+              // Baca isi file untuk mengambil judul resmi (session_info) atau fallback pesan user
               try {
                 const content = fs.readFileSync(fullPath, "utf8");
+                let foundSessionInfoName = "";
+                let firstMeaningfulUserPrompt = "";
+
                 for (const line of content.split("\n")) {
                   if (!line) continue;
-                  const obj = JSON.parse(line);
-                  if (obj.type === "session_info" && obj.name) {
-                    preview = obj.name;
-                    break;
-                  }
-                  if (obj.type === "message" && obj.message?.role === "user") {
-                    const parts = obj.message.content;
-                    if (Array.isArray(parts)) {
-                      const txt = parts.find((p: any) => p.type === "text" && p.text && p.text.trim())?.text;
-                      if (txt) {
-                        const clean = txt.replace(/\s+/g, " ").trim();
-                        if (clean.length > 0 && !clean.startsWith("Attached image")) {
-                          // Prioritaskan pesan substantif daripada salam pendek
-                          if (!preview || preview.length < 5) {
-                            preview = clean.slice(0, 46);
-                            if (clean.length > 5) break;
+                  try {
+                    const obj = JSON.parse(line);
+                    if (obj.type === "session_info" && obj.name && obj.name.trim().length > 0) {
+                      foundSessionInfoName = obj.name.trim();
+                      // session_info terbaru yang menang
+                    }
+                    if (!firstMeaningfulUserPrompt && obj.type === "message" && obj.message?.role === "user") {
+                      const parts = obj.message.content;
+                      if (Array.isArray(parts)) {
+                        const txt = parts.find((p: any) => p.type === "text" && p.text && p.text.trim())?.text;
+                        if (txt) {
+                          const clean = txt.replace(/\s+/g, " ").trim();
+                          if (clean.length > 5 && !clean.startsWith("Attached image") && !clean.startsWith("<skill")) {
+                            firstMeaningfulUserPrompt = clean.slice(0, 46);
                           }
                         }
                       }
                     }
-                  }
+                  } catch {}
                 }
+
+                preview = foundSessionInfoName || firstMeaningfulUserPrompt;
               } catch {}
 
               sessionList.push({
                 path: fullPath,
                 filename: item.name,
                 time: stat.mtime,
-                preview: preview || "Percakapan kosong",
+                preview: preview || "Percakapan baru",
                 sizeKb: (stat.size / 1024).toFixed(0) + "KB",
               });
             }
