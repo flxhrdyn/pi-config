@@ -110,6 +110,13 @@ export default function (pi: ExtensionAPI) {
   let currentDetail = "";
   let isBusy = false;
   let requestTuiRender: (() => void) | null = null;
+  let zenMode = false;
+
+  // Session activity counters
+  let sessionStartTime = Date.now();
+  let totalTurnCount = 0;
+  let totalToolsExecuted = 0;
+  const toolCounts: Record<string, number> = {};
 
   const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -126,6 +133,7 @@ export default function (pi: ExtensionAPI) {
     currentAction = "Thinking";
     currentDetail = "";
     isBusy = true;
+    totalTurnCount++;
 
     ctx.ui.setWorkingVisible(false);
     updateWorkingWidget(ctx);
@@ -224,6 +232,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_start", async (event, ctx) => {
     if (!ctx.hasUI) return;
     const tool = event.toolName;
+    totalToolsExecuted++;
+    toolCounts[tool] = (toolCounts[tool] || 0) + 1;
+
     if (tool === "read") currentAction = "Reading";
     else if (tool === "edit" || tool === "write") currentAction = "Writing";
     else if (tool === "bash") currentAction = "Executing";
@@ -448,4 +459,103 @@ export default function (pi: ExtensionAPI) {
       };
     });
   }
+
+  // Command /stats: Menampilkan floating statistics overlay box ala Neovim modal
+  pi.registerCommand("stats", {
+    description: "Tampilkan statistik detail sesi ini (turns, tools, context, runtime)",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+
+      const elapsedSec = Math.max(0, Math.floor((Date.now() - sessionStartTime) / 1000));
+      const mins = Math.floor(elapsedSec / 60);
+      const secs = elapsedSec % 60;
+      const uptimeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+      const rawId = ctx.model?.id || "pi";
+      const modelName = formatModelDisplayName(rawId);
+      const thinking = ctx.thinkingLevel && ctx.thinkingLevel !== "off" ? ` (${ctx.thinkingLevel})` : "";
+
+      let tokenUsage = "N/A";
+      try {
+        const usage = ctx.getContextUsage?.();
+        if (usage && usage.tokens !== null && usage.tokens !== undefined) {
+          tokenUsage = `${usage.tokens.toLocaleString()} tokens`;
+          if (usage.contextWindow) {
+            tokenUsage += ` / ${(usage.contextWindow / 1000).toFixed(0)}k (${Math.round((usage.tokens / usage.contextWindow) * 100)}%)`;
+          }
+        }
+      } catch {}
+
+      const toolsSummary = Object.entries(toolCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([t, count]) => `${t}: ${count}`)
+        .join(", ");
+
+      const statsText = [
+        "┌────────────────────────────────────────────────────────┐",
+        "│  SESSION STATISTICS                                    │",
+        "├────────────────────────────────────────────────────────┤",
+        `│  Model          : ${modelName}${thinking}`.padEnd(57) + "│",
+        `│  Context Usage  : ${tokenUsage}`.padEnd(57) + "│",
+        `│  Turns Active   : ${totalTurnCount} turn(s)`.padEnd(57) + "│",
+        `│  Tool Calls     : ${totalToolsExecuted} total (${toolsSummary || "none"})`.padEnd(57) + "│",
+        `│  Session Uptime : ${uptimeStr}`.padEnd(57) + "│",
+        `│  Working Dir    : ${process.cwd().replace(/\\/g, "/")}`.padEnd(57) + "│",
+        "├────────────────────────────────────────────────────────┤",
+        "│  Press ESC, ENTER, or Q to close                       │",
+        "└────────────────────────────────────────────────────────┘",
+      ].join("\n");
+
+      await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
+        return {
+          dispose() {},
+          invalidate() {},
+          handleInput(data: string) {
+            if (data === "\x1b" || data === "\r" || data === "\n" || data === "q" || data === "Q") {
+              done();
+              return true;
+            }
+            return true;
+          },
+          render(width: number): string[] {
+            const lines = statsText.split("\n").map((line, idx) => {
+              if (idx === 0 || idx === 2 || idx === 9 || idx === 11) {
+                return theme.fg("borderAccent", line);
+              }
+              if (idx === 1) {
+                return theme.bold(theme.fg("accent", line));
+              }
+              if (idx === 10) {
+                return theme.fg("dim", line);
+              }
+              return theme.fg("text", line);
+            });
+
+            // Center box horizontally
+            return lines.map((l) => {
+              const padLeft = Math.max(1, Math.floor((width - 58) / 2));
+              return " ".repeat(padLeft) + l;
+            });
+          },
+        };
+      }, { overlay: true });
+    },
+  });
+
+  // Command /zen: Toggle Zen mode (sembunyikan/tampilkan header dan statusline)
+  pi.registerCommand("zen", {
+    description: "Toggle Zen mode (mode fokus minimalis tanpa header)",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      zenMode = !zenMode;
+
+      if (zenMode) {
+        ctx.ui.setHeader?.(undefined);
+        ctx.ui.notify("Zen mode ON (header disembunyikan)", "info");
+      } else {
+        initCustomHeader(ctx);
+        ctx.ui.notify("Zen mode OFF (header dipulihkan)", "info");
+      }
+    },
+  });
 }
