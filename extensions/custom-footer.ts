@@ -4,6 +4,7 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as readline from "node:readline";
 
 // Helper mempercantik nama model untuk statusline
 function formatModelDisplayName(rawId: string): string {
@@ -285,33 +286,71 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_before_compact", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     ensureCustomUI(ctx);
+    startTime = Date.now();
+    frameIdx = 0;
+    currentAction = "Compacting";
+    currentDetail = "context";
     isBusy = true;
+
+    ctx.ui.setWorkingVisible(false);
+    updateWorkingWidget(ctx);
     requestTuiRender?.();
+
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {
+      frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
+      updateWorkingWidget(ctx);
+    }, 80);
   });
 
   pi.on("session_compact", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     isBusy = false;
+    currentDetail = "";
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+    if (ctx.ui?.setWidget) {
+      ctx.ui.setWidget("codex-loading", undefined, { placement: "aboveEditor" });
+    }
     requestTuiRender?.();
   });
 
   pi.on("session_compact_failed", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     isBusy = false;
+    currentDetail = "";
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+    }
+    if (ctx.ui?.setWidget) {
+      ctx.ui.setWidget("codex-loading", undefined, { placement: "aboveEditor" });
+    }
     requestTuiRender?.();
   });
 
   function updateWorkingWidget(ctx: any) {
+    if (!ctx.ui?.setWidget) return;
     const elapsedSec = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
     const activeFrame = SPINNER_FRAMES[frameIdx];
 
-    const spinner = ctx.ui.theme.fg("accent", activeFrame);
-    const actionPart = ctx.ui.theme.fg("warning", currentAction);
-    const detailPart = currentDetail ? " " + ctx.ui.theme.fg("text", currentDetail) : "";
-    const metaPart = ctx.ui.theme.fg("dim", ` (${elapsedSec}s • <esc> to stop)`);
+    const fg = ctx.ui.theme?.fg ? (k: string, v: string) => ctx.ui.theme.fg(k, v) : (_k: string, v: string) => v;
+    const spinner = fg("accent", activeFrame);
+    const actionPart = fg("warning", currentAction);
+    const detailPart = currentDetail ? " " + fg("text", currentDetail) : "";
+    const metaPart = fg("dim", ` (${elapsedSec}s • <esc> to stop)`);
     const line = `${spinner} ${actionPart}${detailPart}${metaPart}`;
 
     ctx.ui.setWidget("codex-loading", [line, ""], { placement: "aboveEditor" });
+  }
+
+  class CleanEditor extends CustomEditor {
+    override setWorkingStatusIndicator(_indicator: any) {
+      // Absorb status indicator from Pi interactive mode so it is neither
+      // rendered inside the top border nor pushed up into the chat document.
+    }
   }
 
   function initCleanVimUI(ctx: any) {
@@ -319,7 +358,7 @@ export default function (pi: ExtensionAPI) {
 
     if (typeof ctx.ui?.setEditorComponent === "function") {
       ctx.ui.setEditorComponent((tui: any, editorTheme: any, keybindings: any) => {
-        return new CustomEditor(tui, editorTheme, keybindings, { embedWorkingStatus: false });
+        return new CleanEditor(tui, editorTheme, keybindings, { embedWorkingStatus: true });
       });
     }
 
@@ -349,7 +388,7 @@ export default function (pi: ExtensionAPI) {
           if (branch) {
             const gitDiff = getGitStats();
             const diffStr = gitDiff ? ` ${theme.fg("warning", gitDiff)}` : "";
-            gitPart = theme.fg("dim", ` ${branch}`) + diffStr;
+            gitPart = theme.fg("dim", `git:${branch}`) + diffStr;
           }
 
           const leftItems = [modePart, modelPart, gitPart].filter(Boolean);
@@ -670,9 +709,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // Command /history: Floating interactive session selector ala Telescope
+  // Keep Pi's built-in /resume intact; expose this custom session list as /history.
   pi.registerCommand("history", {
-    description: "Pilih dan lanjutkan sesi chat sebelumnya (Telescope session switcher)",
+    description: "Browse previous sessions with auto-names and relative timestamps",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) return;
 
@@ -682,7 +721,6 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Kumpulkan semua file session jsonl dari semua subfolder
       const sessionList: Array<{
         path: string;
         filename: string;
@@ -692,59 +730,71 @@ export default function (pi: ExtensionAPI) {
       }> = [];
 
       try {
-        const traverseDirs = (dir: string) => {
+        const findSessionFiles = (dir: string, list: string[] = []): string[] => {
           for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
             const fullPath = path.join(dir, item.name);
             if (item.isDirectory()) {
-              traverseDirs(fullPath);
+              findSessionFiles(fullPath, list);
             } else if (item.isFile() && item.name.endsWith(".jsonl")) {
-              const stat = fs.statSync(fullPath);
-              let preview = "";
-
-              // Baca isi file untuk mengambil judul resmi (session_info) atau fallback pesan user
-              try {
-                const content = fs.readFileSync(fullPath, "utf8");
-                let foundSessionInfoName = "";
-                let firstMeaningfulUserPrompt = "";
-
-                for (const line of content.split("\n")) {
-                  if (!line) continue;
-                  try {
-                    const obj = JSON.parse(line);
-                    if (obj.type === "session_info" && obj.name && obj.name.trim().length > 0) {
-                      foundSessionInfoName = obj.name.trim();
-                      // session_info terbaru yang menang
-                    }
-                    if (!firstMeaningfulUserPrompt && obj.type === "message" && obj.message?.role === "user") {
-                      const parts = obj.message.content;
-                      if (Array.isArray(parts)) {
-                        const txt = parts.find((p: any) => p.type === "text" && p.text && p.text.trim())?.text;
-                        if (txt) {
-                          const clean = txt.replace(/\s+/g, " ").trim();
-                          if (clean.length > 5 && !clean.startsWith("Attached image") && !clean.startsWith("<skill")) {
-                            firstMeaningfulUserPrompt = clean.slice(0, 46);
-                          }
-                        }
-                      }
-                    }
-                  } catch {}
-                }
-
-                preview = foundSessionInfoName || firstMeaningfulUserPrompt;
-              } catch {}
-
-              sessionList.push({
-                path: fullPath,
-                filename: item.name,
-                time: stat.mtime,
-                preview: preview || "Percakapan baru",
-                sizeKb: (stat.size / 1024).toFixed(0) + "KB",
-              });
+              list.push(fullPath);
             }
           }
+          return list;
         };
 
-        traverseDirs(sessionsDir);
+        const sessionFiles = findSessionFiles(sessionsDir);
+
+        for (const fullPath of sessionFiles) {
+          const stat = fs.statSync(fullPath);
+          let foundSessionInfoName = "";
+          let firstMeaningfulUserPrompt = "";
+
+          try {
+            const rl = readline.createInterface({
+              input: fs.createReadStream(fullPath, { encoding: "utf8" }),
+              crlfDelay: Infinity,
+            });
+
+            for await (const line of rl) {
+              if (!line) continue;
+              if (line.startsWith("{\"type\":\"session_info\"")) {
+                try {
+                  const obj = JSON.parse(line);
+                  if (obj.name && obj.name.trim().length > 0) {
+                    foundSessionInfoName = obj.name.trim();
+                  }
+                } catch {}
+              } else if (!firstMeaningfulUserPrompt && line.startsWith("{\"type\":\"message\"") && line.includes("\"role\":\"user\"")) {
+                try {
+                  const obj = JSON.parse(line);
+                  if (obj.message?.role === "user") {
+                    const parts = obj.message.content;
+                    let text = "";
+                    if (Array.isArray(parts)) {
+                      text = parts.find((p: any) => p.type === "text" && p.text && p.text.trim())?.text || "";
+                    } else if (typeof parts === "string") {
+                      text = parts;
+                    }
+                    const clean = text.replace(/\s+/g, " ").trim();
+                    if (clean.length > 5 && !clean.startsWith("Attached image") && !clean.startsWith("<skill")) {
+                      firstMeaningfulUserPrompt = clean.slice(0, 46);
+                    }
+                  }
+                } catch {}
+              }
+            }
+          } catch {}
+
+          const preview = foundSessionInfoName || firstMeaningfulUserPrompt || "New session";
+          sessionList.push({
+            path: fullPath,
+            filename: path.basename(fullPath),
+            time: stat.mtime,
+            preview,
+            sizeKb: (stat.size / 1024).toFixed(0) + "KB",
+          });
+        }
+
         sessionList.sort((a, b) => b.time.getTime() - a.time.getTime());
       } catch (err) {
         ctx.ui.notify(`Failed to read session list: ${err}`, "error");
@@ -756,7 +806,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Helper format waktu relatif ala Codex / Git (misal: "31m ago", "18h ago", "2d ago")
+      // Format relative timestamps
       const formatTimeAgo = (date: Date) => {
         const sec = Math.floor((Date.now() - date.getTime()) / 1000);
         if (sec < 60) return `${Math.max(1, sec)}s ago`;
@@ -768,20 +818,19 @@ export default function (pi: ExtensionAPI) {
         return `${day}d ago`;
       };
 
-      // Format opsi untuk SelectList ala Codex
       const options = sessionList.map((s) => {
         const ago = formatTimeAgo(s.time).padEnd(10);
         return `${ago} │ ${s.preview}`;
       });
 
-      const selected = await ctx.ui.select("RESUME SESSION (Telescope History)", options);
+      const selected = await ctx.ui.select("RESUME SESSION", options);
       if (!selected) return;
 
       const idx = options.indexOf(selected);
       if (idx !== -1) {
         const chosen = sessionList[idx];
         if (ctx.switchSession) {
-          ctx.ui.notify(`Beralih ke sesi: ${chosen.preview}`, "info");
+          ctx.ui.notify(`Switching to session: ${chosen.preview}`, "info");
           await ctx.switchSession(chosen.path);
         } else {
           ctx.ui.notify("switchSession is not supported in the current context", "warning");

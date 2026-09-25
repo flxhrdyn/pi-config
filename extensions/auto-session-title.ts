@@ -34,10 +34,46 @@ export function cleanTitle(raw: string): string {
   return clean;
 }
 
-// Fallback lokal sederhana: ambil 5 kata awal dari pesan user yang substantif tanpa hardcode kamus bahasa
+const NON_TASK_PROMPTS = new Set([
+  "hi", "hello", "hey", "halo", "hai", "pagi", "siang", "sore", "malam",
+  "good morning", "good afternoon", "good evening", "test", "tes", "thanks",
+  "thank you", "makasih", "terima kasih", "ok", "oke", "okay", "lanjut", "continue",
+  "halo bot", "hello bot", "hi bot",
+]);
+
+const NON_TASK_COMMAND = /^\/(?:resume|new|tree|fork|sessions|help|compact|clear|quit|exit)(?:\s|$)/i;
+const TASK_COMMAND = /^\/(?:plan|build|debug|review)\s+([\s\S]+)$/i;
+
+/** Return the first task-bearing prompt, ignoring greetings and session-control commands. */
+export function selectInitialTitlePrompt(userTexts: string[]): string | null {
+  for (const rawText of userTexts) {
+    let prompt = rawText.trim();
+    if (!prompt || NON_TASK_COMMAND.test(prompt)) continue;
+
+    const taskCommand = prompt.match(TASK_COMMAND);
+    if (taskCommand) {
+      prompt = taskCommand[1].trim();
+    } else if (/^\/[\w-]+(?:\s|$)/.test(prompt)) {
+      continue;
+    }
+
+    const normalized = prompt
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (NON_TASK_PROMPTS.has(normalized)) continue;
+    if (prompt.length <= 8 && normalized.split(" ").length < 2) continue;
+
+    return prompt;
+  }
+
+  return null;
+}
+
+// Fallback lokal sederhana: ambil 5 kata awal dari prompt tugas pertama.
 export function generateLocalFallbackTitle(userTexts: string[]): string {
-  const reversed = [...userTexts].reverse();
-  const target = reversed.find((t) => t.trim().length > 6) || userTexts[userTexts.length - 1] || "";
+  const target = selectInitialTitlePrompt(userTexts) || "";
   const words = target
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .split(/\s+/)
@@ -146,8 +182,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // 2. Ambil riwayat percakapan dari sessionManager
-    const entries = (ctx.sessionManager?.getEntries?.() || []) as Array<{
+    // Use only the active path: getEntries() also includes abandoned/forked branches.
+    const entries = (ctx.sessionManager?.getBranch?.() || []) as Array<{
       type?: string;
       customType?: string;
       message?: { role?: string; content?: unknown };
@@ -187,8 +223,10 @@ export default function (pi: ExtensionAPI) {
 
     if (hasCustomMetadata) return;
 
-    // Batas aman: minimal 2 pesan user dan 1 pesan asisten
-    if (userTexts.length < 2 || assistantMessageCount < 1) {
+    const titlePrompt = selectInitialTitlePrompt(userTexts);
+
+    // Wait until at least one assistant turn has completed for a real task prompt.
+    if (!titlePrompt || assistantMessageCount < 1) {
       return;
     }
 
@@ -207,13 +245,11 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        // Use the latest substantive context (not just the opening greeting)
-        const reversed = [...userTexts].reverse();
-        const latestSubstantive = reversed.find((t) => t.length > 8) || userTexts[userTexts.length - 1] || "";
-        const contextSample = latestSubstantive.slice(0, 300);
+        // Codex-style stable history label: derive once from the first task-bearing request.
+        const contextSample = titlePrompt.slice(0, 300);
 
         // Fallback lokal instan
-        const localFallback = generateLocalFallbackTitle(userTexts);
+        const localFallback = generateLocalFallbackTitle([titlePrompt]);
 
         // Minta rangkuman dari model
         let finalTitle = await requestLlmTitle(contextSample, 3500);

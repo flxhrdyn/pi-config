@@ -1,13 +1,96 @@
 {
-  "theme": "gruvbox",
+  "compaction": {
+    "enabled": true,
+    "modelOverrides": {
+      "9router/ag/claude-opus-4-6-thinking": {
+        "reserveTokens": 100000
+      },
+      "9router/ag/claude-sonnet-4-6": {
+        "reserveTokens": 500000
+      },
+      "9router/ag/gemini-3-flash": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3-flash-agent": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.1-pro-low": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.5-flash-extra-low": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.5-flash-high": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.5-flash-low": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.6-flash-high": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.6-flash-low": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.6-flash-medium": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.7-flash-high": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.7-flash-low": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.7-flash-medium": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.8-flash": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.8-flash-high": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.8-flash-low": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-3.8-flash-medium": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gemini-pro-agent": {
+        "reserveTokens": 524288
+      },
+      "9router/ag/gpt-oss-120b-medium": {
+        "reserveTokens": 64000
+      },
+      "opencode-zen/opencode/ling-3.0-flash-fin-free": {
+        "reserveTokens": 131072
+      },
+      "opencode-zen/opencode/mimo-v2.6-flash-free": {
+        "reserveTokens": 100000
+      },
+      "opencode-zen/opencode/muse-spark-1.2-contributor-free": {
+        "reserveTokens": 524288
+      },
+      "opencode-zen/opencode/muse-spark-1.3-contributor-free": {
+        "reserveTokens": 524288
+      },
+      "opencode-zen/opencode/nemotron-3-ultra-free": {
+        "reserveTokens": 500000
+      },
+      "opencode-zen/opencode/nemotron-3.5-lightning-free": {
+        "reserveTokens": 131072
+      }
+    }
+  },
+  "editorPaddingX": 1,
+  "lastChangelogVersion": "0.87.1",
   "packages": [
     "npm:pi-9router-ext",
     "npm:pi-subagents",
     "npm:pi-web-access",
     "npm:pi-goal-x"
   ],
-  "editorPaddingX": 1,
-  "tuiMode": "fullscreen",
   "quietStartup": true,
-  "lastChangelogVersion": "0.87.1"
+  "theme": "gruvbox",
+  "tuiMode": "fullscreen"
 }

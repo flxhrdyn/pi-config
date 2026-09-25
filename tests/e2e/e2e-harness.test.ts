@@ -337,10 +337,12 @@ runOrSkip("E2E Harness: Actual Pi Runtime & Deterministic Extension Testing", ()
     const extCtx: any = makeContext(session, fixture.dir);
 
     // 1. Giliran pertama (1 pesan user) -> tidak boleh menamai
-    session.sessionManager.getEntries = () => [
+    const turn1 = [
       { type: "message", message: { role: "user", content: "Halo bot" } },
       { type: "message", message: { role: "assistant", content: "Halo, ada yang bisa dibantu?" } },
     ];
+    session.sessionManager.getEntries = () => turn1;
+    session.sessionManager.getBranch = () => turn1;
 
     for (const h of settledHandlers) {
       await h({}, extCtx);
@@ -350,12 +352,14 @@ runOrSkip("E2E Harness: Actual Pi Runtime & Deterministic Extension Testing", ()
     expect(sessionName).toBeUndefined();
 
     // 2. Giliran kedua (2 pesan user) -> harus menamai otomatis via mock LLM
-    session.sessionManager.getEntries = () => [
+    const turn2 = [
       { type: "message", message: { role: "user", content: "Halo bot" } },
       { type: "message", message: { role: "assistant", content: "Halo" } },
       { type: "message", message: { role: "user", content: "Buat sistem otentikasi login pengguna" } },
       { type: "message", message: { role: "assistant", content: "Baik, sedang disiapkan." } },
     ];
+    session.sessionManager.getEntries = () => turn2;
+    session.sessionManager.getBranch = () => turn2;
 
     for (const h of settledHandlers) {
       await h({}, extCtx);

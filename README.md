@@ -44,7 +44,7 @@ pi --no-welcome
 - **Startup Header**: centered 3-piece Pi logo with `[Version]`, `[Model]`, `[Directory]`, and `[Shortcuts]`.
 - **Statusline Footer**: mode (`NORMAL` / `BUSY`), active model, git branch with diff count, and context gauge.
 - **Breadcrumbs**: live status above the editor showing current tool target and elapsed time.
-- `/history`: session switcher with relative timestamps (`31m ago`) and clean auto-titles.
+- `/resume`: session switcher with relative timestamps (`31m ago`) and clean auto-titles.
 - `/stats`: floating card showing token usage, turn count, uptime, and tool call breakdown.
 - `/zen`: toggle startup header on/off.
 - `/themes`: switch theme and auto-sync terminal background color.
